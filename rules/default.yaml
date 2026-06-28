@@ -1,0 +1,66 @@
+# RedactGate — default CN-PII ruleset
+#
+# This file ships with the package and is the baseline every scan/proxy run
+# starts from. A user ruleset (passed via `--rules my.yaml`) is merged ON TOP of
+# this one: scalar keys override, the `detectors` map merges per-type, and
+# `allowlist` / `custom_patterns` are concatenated. See `redactgate.rules`.
+#
+# Design note: every built-in detector validates a checksum (GB 11643 校验位 /
+# Luhn / mod-11-2) before reporting a hit, so plain 18-digit numbers are NOT
+# masked. `min_confidence` lets you raise the bar further.
+
+version: 1
+
+# Global default for how a confirmed hit is handled when a detector does not
+# override it: "mask" replaces the value field-level; "block" stops the outbound
+# request entirely (proxy only). v0.1 ships "mask" as the default.
+default_policy: mask
+
+# Lowest confidence a detection must reach to be acted on (0.0 - 1.0).
+min_confidence: 0.5
+
+# How masked values are rendered.
+masking:
+  # "partial" keeps a head/tail of the original so the diff stays reviewable
+  #   (e.g. 110101199003078515 -> 1101**********8515);
+  # "full"  replaces the whole span with a single placeholder;
+  # "label" replaces the span with a typed tag (e.g. [身份证-已脱敏]).
+  style: partial
+  mask_char: "*"
+  keep_prefix: 4 # head chars kept verbatim under "partial"
+  keep_suffix: 4 # tail chars kept verbatim under "partial"
+  # Per-type label used when masking.style == "label" (and the suffix tag in the
+  # audit log regardless of style).
+  labels:
+    id_card: "[身份证-已脱敏]"
+    phone: "[手机号-已脱敏]"
+    bank_card: "[银行卡-已脱敏]"
+    uscc: "[统一社会信用代码-已脱敏]"
+    intranet_domain: "[内网域名-已脱敏]"
+
+# Which built-in detectors run, and per-type overrides. Disable a type with
+# `enabled: false` or tighten it with its own `min_confidence` / `policy`.
+detectors:
+  id_card: # 居民身份证 — 18 位，GB 11643 校验位
+    enabled: true
+  phone: # 中国大陆手机号 — 11 位，号段表
+    enabled: true
+  bank_card: # 银行卡号 — 13-19 位，Luhn 校验
+    enabled: true
+  uscc: # 统一社会信用代码 — 18 位，mod-11-2 校验
+    enabled: true
+  intranet_domain: # 内网域名 / 主机名 — .corp / .internal / .local 等
+    enabled: true
+
+# Substrings that are NEVER masked even if a detector would flag them. Use this
+# for well-known public test fixtures, doc examples, or sample IDs that are not
+# real PII. Matching is exact-substring against the detected raw value.
+allowlist:
+  - "00000000000000000X" # canonical placeholder, not a real 身份证
+  - "example.internal" # documentation hostname
+
+# Extra user-supplied regex recognizers, layered on top of the built-ins. Each
+# entry needs a `type` (label) and a `pattern` (Python regex). Optional
+# `checksum` ties it to a built-in validator ("id_card" | "bank_card" | "uscc"),
+# otherwise the regex match alone is the signal. Ships empty.
+custom_patterns: []

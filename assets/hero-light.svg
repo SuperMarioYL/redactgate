@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" width="880" height="300"
+     font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+     role="img" aria-label="RedactGate — local outbound redaction gateway for coding agents">
+  <defs>
+    <linearGradient id="hl-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#FBF1EE"/>
+    </linearGradient>
+    <linearGradient id="hl-name" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#C2410C"/>
+      <stop offset="1" stop-color="#DC2626"/>
+    </linearGradient>
+    <marker id="hl-ar" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#DC2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="880" height="300" rx="20" fill="url(#hl-bg)"/>
+  <rect x="0.5" y="0.5" width="879" height="299" rx="20" fill="none" stroke="#F0D9D2" stroke-width="1"/>
+
+  <!-- shield mark -->
+  <g transform="translate(56,70)">
+    <path d="M40 0 L78 14 V52 C78 86 58 108 40 116 C22 108 2 86 2 52 V14 Z"
+          fill="#DC2626" fill-opacity="0.10" stroke="#DC2626" stroke-width="2"/>
+    <path d="M40 16 L62 24 V52 C62 74 50 88 40 92 C30 88 18 74 18 52 V24 Z"
+          fill="#F59E0B" fill-opacity="0.14" stroke="#F59E0B" stroke-width="1.5"/>
+    <text x="40" y="63" text-anchor="middle" font-size="26" font-weight="700" fill="#C2410C">脱</text>
+  </g>
+
+  <!-- name + tagline -->
+  <text x="172" y="92" font-size="52" font-weight="800" fill="url(#hl-name)" letter-spacing="-1">RedactGate</text>
+  <text x="174" y="128" font-size="19" font-weight="600" fill="#1D1D1F">出境脱敏网关 · Local Outbound Redaction Gateway</text>
+  <text x="174" y="156" font-size="15" font-weight="500" fill="#6E6E73">校验位级掩码中国 PII，数据不出境 — 让 Claude Code / Codex 安全碰内网私有库</text>
+
+  <!-- before -> after masking strip -->
+  <g transform="translate(174,196)">
+    <rect x="0" y="0" width="300" height="74" rx="12" fill="#DC2626" fill-opacity="0.07" stroke="#DC2626" stroke-width="1.2"/>
+    <text x="16" y="26" font-size="12" font-weight="600" fill="#B91C1C">出站前 BEFORE</text>
+    <text x="16" y="52" font-size="17" font-weight="600" font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#1D1D1F">110101199003078515</text>
+
+    <line x1="318" y1="37" x2="356" y2="37" stroke="#DC2626" stroke-width="1.6" marker-end="url(#hl-ar)"/>
+
+    <rect x="372" y="0" width="300" height="74" rx="12" fill="#10A37F" fill-opacity="0.08" stroke="#10A37F" stroke-width="1.2"/>
+    <text x="388" y="26" font-size="12" font-weight="600" fill="#0B6B53">出站后 MASKED</text>
+    <text x="388" y="52" font-size="17" font-weight="600" font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#0B6B53">1101**********8515</text>
+  </g>
+</svg>
