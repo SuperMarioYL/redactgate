@@ -11,7 +11,7 @@
 <p align="center"><sub>给 Claude Code / Codex 等云端 Coding Agent 接的本地出站脱敏网关：出境前对中国 PII 做校验位级字段脱敏并落审计日志，让数据不出境。</sub></p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-black.svg" alt="License: MIT"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-black.svg" alt="License: Apache-2.0"></a>
   <a href="https://github.com/SuperMarioYL/redactgate/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/redactgate?color=DC2626&label=release" alt="Latest release"></a>
   <a href="https://github.com/SuperMarioYL/redactgate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/redactgate/ci.yml?branch=main&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-3776AB.svg" alt="Python 3.12+">
