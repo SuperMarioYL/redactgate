@@ -26,7 +26,7 @@ First public release.
 - **`redactgate report`** — summary of the redactions in an audit log.
 - **Bundled CN-PII ruleset** (`rules/default.yaml`) controlling which detectors
   are enabled, the masking style, and an allowlist; user rulesets merge on top.
-- Bilingual README (中文 primary + English sibling), MIT licensed.
+- Bilingual README (中文 primary + English sibling), Apache 2.0 licensed.
 
 [Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.1.0
