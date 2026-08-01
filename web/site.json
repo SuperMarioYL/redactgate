@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "name": "redactgate",
+  "github": "https://github.com/SuperMarioYL/redactgate",
+  "host": "redactgate.lei6393.com",
+  "lang": { "primary": "zh", "toggle": true },
+  "accent": ["#22b8a6"],
+  "hero": {
+    "eyebrow": { "zh": "本地 · 无账号 · 一行 pipe", "en": "Local · no account · one pipe" },
+    "headline": {
+      "zh": "让云端 Coding Agent\n安全碰你的内网私有库",
+      "en": "Let cloud coding agents\ntouch your private repos, safely"
+    },
+    "sub": {
+      "zh": "坐在 Agent 与模型之间，出境前只对通过校验位的中国 PII 做字段级掩码，业务逻辑原样进模型，每一次脱敏都落进审计日志。",
+      "en": "It sits between your agent and the model; before anything egresses it masks only checksum-validated Chinese PII field-by-field, leaves the business logic untouched, and logs every mask."
+    },
+    "command": "redactgate mask",
+    "cta": { "zh": "开始使用", "en": "Get started" },
+    "ctaGithub": { "zh": "在 GitHub 查看", "en": "View on GitHub" }
+  },
+  "advantages": [
+    {
+      "title": { "zh": "只掩真的 PII，不碰你的业务逻辑", "en": "Masks only real PII, never your logic" },
+      "body": {
+        "zh": "身份证走 GB 11643 校验位、银行卡走 Luhn、统一社会信用代码走 mod-31——只对通过校验的串做字段级掩码，普通 18 位计数器原样保留，业务代码一个字节不动地送达模型。",
+        "en": "ID cards pass GB 11643, bank cards pass Luhn, USCC passes mod-31 — only checksum-valid strings are masked field-by-field. A plain 18-digit counter is left alone, and your business code reaches the model byte-for-byte."
+      },
+      "chips": ["› 校验位级 CN-PII 识别", "› 字段级掩码 · 业务逻辑原样"]
+    },
+    {
+      "title": { "zh": "一行 pipe，出境前就掩好", "en": "One pipe, masked before egress" },
+      "body": {
+        "zh": "cat 文件 | redactgate mask，出站文本里的身份证/手机号就地掩成 1101**********8515，输出可直接喂给 Agent，零配置；也可起一个本地 HTTP 代理拦出站请求体。",
+        "en": "cat file | redactgate mask and the id-card / phone fields in the outbound text become 1101**********8515 on the spot — pipe it straight to your agent, zero config. Or run a local HTTP proxy that masks request bodies before forwarding."
+      },
+      "chips": ["› redactgate mask 一行过滤", "› 本地 HTTP 代理可选"]
+    },
+    {
+      "title": { "zh": "每一次脱敏都有审计留痕", "en": "Every mask leaves an audit trail" },
+      "body": {
+        "zh": "每掩一个字段就往 JSONL 审计日志写一行——谁、在哪一行、什么类型、掩成什么样，绝不含原始 PII。合规复核一条 grep 就能看清。",
+        "en": "Every masked field appends one JSONL line — who, which line, what type, what it was masked to — never the raw PII. A compliance reviewer can trace the whole trail with one grep."
+      },
+      "chips": ["› JSONL 审计日志", "› 只记掩码 · 不留原文"]
+    },
+    {
+      "title": { "zh": "自定义你行业的 PII 规则", "en": "Define your sector's PII rules" },
+      "body": {
+        "zh": "一份 YAML 规则里加你自己的识别器——员工号、项目代号、内部主机名——按校验位或纯正则生效，团队规则一次下发，五类内置 CN-PII 之上即插即用。",
+        "en": "Add your own recognizers in one YAML ruleset — employee ids, project codes, internal hostnames — gated by a checksum or plain regex, rolled out once across the team, layered on top of five built-in Chinese-PII types."
+      },
+      "chips": ["› YAML 自定义识别器", "› 五类内置 CN-PII"]
+    }
+  ],
+  "scene": { "kind": "particle-field" },
+  "cta": {
+    "headline": { "zh": "让数据不出境，让 Agent 放手干", "en": "Keep data onshore; let agents do their work" },
+    "sub": { "zh": "开源、Apache 2.0、无付费墙。出站脱敏这一核心动作，永不设墙。", "en": "Open source, Apache 2.0, no paywall. The core act of masking on egress is never gated." },
+    "button": { "zh": "开始使用", "en": "Get started" }
+  },
+  "footer": { "tag": { "zh": "给 Claude Code / Codex 接的本地出站脱敏网关", "en": "A local outbound redaction gateway for Claude Code / Codex" } }
+}
