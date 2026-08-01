@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -208,6 +209,7 @@ class AuditLog:
     stream: IO[str] | None = None
     _own_stream: bool = field(default=False, init=False, repr=False)
     count: int = field(default=0, init=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.stream is None:
@@ -222,12 +224,20 @@ class AuditLog:
     # -- writing -----------------------------------------------------------
 
     def append(self, entry: AuditEntry) -> None:
-        """Append one entry as a JSON line and flush."""
+        """Append one entry as a JSON line and flush (thread-safe).
+
+        The local HTTP forward proxy (:class:`~redactgate.proxy.RedactingProxyServer`)
+        serves concurrent agent requests on a threaded server, so several threads
+        can call this at once. The lock keeps the write + flush + count atomic so
+        two threads can never interleave half a JSON line into the compliance
+        trail — the audit log's integrity is the product's headline guarantee.
+        """
         assert self.stream is not None  # set in __post_init__
-        self.stream.write(entry.to_json())
-        self.stream.write("\n")
-        self.stream.flush()
-        self.count += 1
+        with self._lock:
+            self.stream.write(entry.to_json())
+            self.stream.write("\n")
+            self.stream.flush()
+            self.count += 1
 
     def append_redactions(
         self, redactions: Iterable[Redaction], *, file: str, ts: str | None = None
@@ -257,14 +267,15 @@ class AuditLog:
 def read_entries(path: str | os.PathLike[str]) -> Iterator[AuditEntry]:
     """Yield every :class:`AuditEntry` parsed from a JSONL audit ``path``.
 
-    Blank lines are skipped; a malformed line raises ``json.JSONDecodeError`` so
-    a corrupted log is loud rather than silently dropped.
+    Blank lines are skipped; a malformed (non-JSON) line is skipped rather than
+    aborting the whole report, so a compliance log that accreted a corrupt line
+    (a partial write, an editor save race) still yields its clean entries.
 
     Args:
         path: the JSONL audit file to read.
 
     Yields:
-        One :class:`AuditEntry` per non-blank line, in file order.
+        One :class:`AuditEntry` per non-blank, JSON-valid line, in file order.
     """
     file_path = Path(path)
     with open(file_path, "r", encoding="utf-8") as handle:
@@ -272,4 +283,8 @@ def read_entries(path: str | os.PathLike[str]) -> Iterator[AuditEntry]:
             line = line.strip()
             if not line:
                 continue
-            yield AuditEntry.from_dict(json.loads(line))
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            yield AuditEntry.from_dict(data)

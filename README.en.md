@@ -24,6 +24,7 @@
 ```bash
 pip install redactgate
 redactgate scan examples/demo-repo/leaky.py     # list every hit with line/type/checksum
+redactgate mask < examples/demo-repo/leaky.py    # field-level mask on egress (one pipe)
 redactgate proxy --stdin < examples/demo-repo/leaky.py | head   # mask on egress
 ```
 

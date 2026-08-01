@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from redactgate.audit import (
     AUDIT_SCHEMA_VERSION,
@@ -27,6 +30,7 @@ from redactgate.audit import (
     build_entry,
     read_entries,
 )
+from redactgate.cli import cli
 from redactgate.proxy import (
     ProxyConfig,
     UpstreamResponse,
@@ -346,3 +350,101 @@ def test_demo_file_masks_all_planted_pii() -> None:
     assert types.get("bank_card", 0) >= 1
     assert types.get("uscc", 0) >= 1
     assert types.get("intranet_domain", 0) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# v0.2 m2 — thread-safe audit log + robust read_entries (bug-hunter bh2/bh3)
+# --------------------------------------------------------------------------- #
+
+
+def test_audit_log_concurrent_appends_stay_clean(tmp_path) -> None:
+    audit_file = tmp_path / "audit.jsonl"
+    redactions = redact_text(SNIPPET).redactions  # id_card + phone
+    assert len(redactions) >= 2
+
+    log = AuditLog(audit_file)
+    n_threads, k = 8, 100
+
+    def worker() -> None:
+        for _ in range(k):
+            for r in redactions:
+                log.append(build_entry(r, file="leaky.py"))
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    log.close()
+
+    expected = n_threads * k * len(redactions)
+    lines = audit_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == expected  # no lost / merged lines
+    for line in lines:
+        json.loads(line)  # every line is a clean JSON object (no interleaving)
+    assert log.count == expected
+
+
+def test_read_entries_skips_malformed_lines(tmp_path) -> None:
+    audit_file = tmp_path / "audit.jsonl"
+    good = build_entry(
+        next(r for r in redact_text(SNIPPET).redactions if r.type == "id_card"),
+        file="leaky.py",
+    ).to_json()
+    # 3 good lines + 1 garbage + 1 blank line.
+    audit_file.write_text(
+        f"{good}\nNOT JSON HERE\n{good}\n   \n{good}\n", encoding="utf-8"
+    )
+    entries = list(read_entries(audit_file))
+    assert len(entries) == 3
+    assert all(e.type == "id_card" for e in entries)
+
+
+# --------------------------------------------------------------------------- #
+# v0.2 m3 — `redactgate mask` + `scan` stdin/multi-path (feature)
+# --------------------------------------------------------------------------- #
+
+
+def test_mask_command_masks_stdin() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mask"], input=SNIPPET)
+    assert result.exit_code == 0
+    assert ID_CARD not in result.output
+    assert PHONE not in result.output
+    assert "def settle(amount):" in result.output  # business logic survives
+
+
+def test_mask_command_report_and_style() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mask", "--report", "--style", "full"], input=SNIPPET)
+    assert result.exit_code == 0
+    assert ID_CARD not in result.output
+    assert "id_card" in result.output  # per-type summary table on stderr
+
+
+def test_scan_reads_stdin() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["scan", "-"], input=SNIPPET)
+    assert result.exit_code == 1  # PII found -> non-zero (CI gate)
+    assert "id_card" in result.output
+
+
+def test_scan_aggregates_multiple_files(tmp_path) -> None:
+    a = tmp_path / "a.py"
+    a.write_text(f'id = "{ID_CARD}"\n', encoding="utf-8")
+    b = tmp_path / "b.py"
+    b.write_text(f'phone = "{PHONE}"\n', encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["scan", str(a), str(b)])
+    assert result.exit_code == 1
+    # one id_card (a.py) + one phone (b.py) aggregated across both files.
+    assert "2 hit(s)" in result.output
+
+
+def test_scan_clean_file_exits_zero(tmp_path) -> None:
+    clean = tmp_path / "clean.py"
+    clean.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["scan", str(clean)])
+    assert result.exit_code == 0
+    assert "no CN-PII" in result.output

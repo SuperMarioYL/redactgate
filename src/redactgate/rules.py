@@ -23,6 +23,7 @@ dependency that the rest of the package builds on.
 from __future__ import annotations
 
 import importlib.resources as resources
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -270,10 +271,17 @@ def _coerce_custom_patterns(raw: Any) -> tuple[CustomPattern, ...]:
             raise RulesError(
                 f"custom_patterns[{i}] needs both `type` and `pattern`"
             )
+        pattern_str = str(entry["pattern"])
+        try:
+            re.compile(pattern_str)
+        except re.error as exc:
+            raise RulesError(
+                f"custom_patterns[{i}] pattern is invalid regex: {exc}"
+            ) from exc
         out.append(
             CustomPattern(
                 type=str(entry["type"]),
-                pattern=str(entry["pattern"]),
+                pattern=pattern_str,
                 checksum=(
                     str(entry["checksum"]) if entry.get("checksum") is not None else None
                 ),

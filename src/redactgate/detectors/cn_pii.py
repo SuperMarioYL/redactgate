@@ -34,7 +34,12 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, Sequence
 
-from ..rules import DETECTOR_TYPES, Ruleset, load_default_ruleset
+from ..rules import (
+    DETECTOR_TYPES,
+    CustomPattern,
+    Ruleset,
+    load_default_ruleset,
+)
 from .checksum import is_valid_bank_card, is_valid_id_card, is_valid_uscc
 
 __all__ = [
@@ -296,6 +301,68 @@ RECOGNIZERS: dict[str, "Recognizer | _IntranetDomainRecognizer"] = {
 
 
 # --------------------------------------------------------------------------- #
+# User-supplied custom recognizers (ruleset.custom_patterns)
+# --------------------------------------------------------------------------- #
+#
+# The ruleset parses `custom_patterns` (each {type, pattern, checksum?,
+# confidence}) from YAML and validates the regex compiles at *load* time (a bad
+# pattern raises ``RulesError`` before any scan/proxy run). Here we turn each
+# parsed :class:`~redactgate.rules.CustomPattern` into a real :class:`Recognizer`
+# so ``detect`` finally honours the documented extensibility surface: a user can
+# add an ``employee_id`` / ``project_code`` / sector-specific recognizer without
+# forking the lib. A pattern may optionally tie to a built-in checksum validator
+# (``id_card`` / ``bank_card`` / ``uscc``); otherwise the regex match alone is the
+# signal (same shape as ``phone`` / ``intranet_domain``).
+
+#: Built-in checksum validators a custom pattern can reuse. Maps the
+#: ``checksum`` label (matching a built-in detector type) to
+#: ``(validator, cleaner)`` so e.g. a bank-card-shaped custom pattern strips
+#: grouping separators before its Luhn check.
+_CHECKSUM_VALIDATORS: dict[str, tuple[Callable[[str], bool], Callable[[str], str]]] = {
+    "id_card": (is_valid_id_card, _identity),
+    "bank_card": (is_valid_bank_card, _strip_separators),
+    "uscc": (is_valid_uscc, _identity),
+}
+
+#: Compiled-Recognizer cache keyed by the (hashable) CustomPattern itself, so a
+#: hot ``detect`` loop (the proxy per outbound chunk) never recompiles user
+#: regexes. Two custom patterns with identical fields yield one Recognizer —
+#: correct, since a Recognizer is just pattern + validator + confidence.
+_CUSTOM_RECOGNIZER_CACHE: dict[CustomPattern, "Recognizer"] = {}
+
+
+def _build_custom_recognizer(cp: CustomPattern) -> "Recognizer":
+    """Compile one user :class:`CustomPattern` into a :class:`Recognizer`."""
+    pattern = re.compile(cp.pattern)  # already validated at ruleset-load time
+    if cp.checksum in _CHECKSUM_VALIDATORS:
+        validator, cleaner = _CHECKSUM_VALIDATORS[cp.checksum]
+    else:
+        validator, cleaner = None, _identity
+    return Recognizer(
+        type=cp.type,
+        pattern=pattern,
+        validator=validator,
+        confidence_ok=cp.confidence,
+        confidence_bad=0.0,  # a failed checksum (when tied) drops the candidate
+        cleaner=cleaner,
+    )
+
+
+def _custom_recognizers(
+    ruleset: Ruleset,
+) -> list["Recognizer"]:
+    """Return cached :class:`Recognizer` objects for ``ruleset.custom_patterns``."""
+    built: list[Recognizer] = []
+    for cp in ruleset.custom_patterns:
+        recognizer = _CUSTOM_RECOGNIZER_CACHE.get(cp)
+        if recognizer is None:
+            recognizer = _build_custom_recognizer(cp)
+            _CUSTOM_RECOGNIZER_CACHE[cp] = recognizer
+        built.append(recognizer)
+    return built
+
+
+# --------------------------------------------------------------------------- #
 # Public detection entry points
 # --------------------------------------------------------------------------- #
 
@@ -303,12 +370,22 @@ RECOGNIZERS: dict[str, "Recognizer | _IntranetDomainRecognizer"] = {
 def _active_recognizers(
     ruleset: Ruleset,
 ) -> Iterable["Recognizer | _IntranetDomainRecognizer"]:
-    """Yield recognizers enabled by ``ruleset`` in stable display order."""
+    """Yield recognizers enabled by ``ruleset`` in stable display order.
+
+    Built-ins run first (in :data:`~redactgate.rules.DETECTOR_TYPES` order); then
+    user-supplied ``custom_patterns`` recognizers, so a custom pattern can add a
+    new type or layer on top without displacing the built-ins. A custom type is
+    also gated by :meth:`~redactgate.rules.Ruleset.is_enabled`, so a user can
+    disable one via the ``detectors`` map just like a built-in.
+    """
     for type_name in DETECTOR_TYPES:
         if not ruleset.is_enabled(type_name):
             continue
         recognizer = RECOGNIZERS.get(type_name)
         if recognizer is not None:
+            yield recognizer
+    for recognizer in _custom_recognizers(ruleset):
+        if ruleset.is_enabled(recognizer.type):
             yield recognizer
 
 

@@ -17,6 +17,7 @@ declared in ``pyproject.toml``.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 from typing import Optional
@@ -31,7 +32,13 @@ from .audit import AuditLog, read_entries
 from .detectors import scan_text
 from .proxy import ProxyConfig, RedactingProxyServer, run_stdin_filter
 from .redactor import RedactResult, redact_text
-from .rules import Ruleset, load_default_ruleset, load_ruleset
+from .rules import (
+    MaskStyleName,
+    MaskingStyle,
+    Ruleset,
+    load_default_ruleset,
+    load_ruleset,
+)
 
 # stderr console for status / tables; stdout stays clean for piped output.
 _err = Console(stderr=True)
@@ -58,6 +65,34 @@ def _load_rules(rules_path: Optional[str]) -> Ruleset:
     return load_default_ruleset()
 
 
+def _override_style(ruleset: Ruleset, style_name: str) -> Ruleset:
+    """Return a copy of ``ruleset`` with the masking style overridden."""
+    base = ruleset.masking
+    new_masking = MaskingStyle(
+        style=MaskStyleName(style_name),
+        mask_char=base.mask_char,
+        keep_prefix=base.keep_prefix,
+        keep_suffix=base.keep_suffix,
+        labels=base.labels,
+    )
+    return dataclasses.replace(ruleset, masking=new_masking)
+
+
+def _print_mask_report(result: RedactResult) -> None:
+    """Render a per-type summary of a mask run to stderr."""
+    counts = result.counts_by_type()
+    if not counts:
+        _err.print("[green]✓[/green] no CN-PII masked.")
+        return
+    table = Table(title="redactgate mask — summary", title_justify="left")
+    table.add_column("Type", style="magenta")
+    table.add_column("类型", style="magenta")
+    table.add_column("Count", justify="right", style="cyan")
+    for type_name in sorted(counts, key=lambda t: (-counts[t], t)):
+        table.add_row(type_name, _label(type_name), str(counts[type_name]))
+    _err.print(table)
+
+
 # --------------------------------------------------------------------------- #
 # Root group
 # --------------------------------------------------------------------------- #
@@ -81,8 +116,8 @@ def cli() -> None:  # pragma: no cover - click dispatch
 # --------------------------------------------------------------------------- #
 
 
-@cli.command(help="Scan a file and list every CN-PII hit with line/column.")
-@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@cli.command(help="Scan file(s) (or stdin via '-') and list every CN-PII hit.")
+@click.argument("files", nargs=-1, required=True)
 @click.option(
     "--rules",
     "rules_path",
@@ -96,59 +131,154 @@ def cli() -> None:  # pragma: no cover - click dispatch
     is_flag=True,
     help="Emit hits as JSON lines (for scripting) instead of a table.",
 )
-def scan(file: Path, rules_path: Optional[str], as_json: bool) -> None:
-    """List every checksum-validated CN-PII hit in ``file``."""
+def scan(files: tuple[str, ...], rules_path: Optional[str], as_json: bool) -> None:
+    """List every checksum-validated CN-PII hit across one or more files.
+
+    Pass ``-`` to read from stdin (e.g. ``git diff | redactgate scan -``), or
+    multiple paths to scan them in one invocation. Exit code is 1 if any PII is
+    found (so CI / pre-commit hooks can gate on it), 0 otherwise.
+    """
     ruleset = _load_rules(rules_path)
-    text = file.read_text(encoding="utf-8", errors="replace")
-    hits = scan_text(text, ruleset)
+    sources: list[tuple[str, list]] = []
+    any_hits = False
+    for path in files:
+        if path == "-":
+            text = sys.stdin.read()
+            label = "<stdin>"
+        else:
+            file_path = Path(path)
+            if not file_path.is_file():
+                _err.print(f"[red]error:[/red] {path}: not a file")
+                sys.exit(2)
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            label = str(file_path)
+        hits = scan_text(text, ruleset)
+        sources.append((label, hits))
+        if hits:
+            any_hits = True
 
     if as_json:
         import json
 
-        for hit in hits:
-            click.echo(
-                json.dumps(
-                    {
-                        "type": hit.type,
-                        "line": hit.line,
-                        "col": hit.col,
-                        "checksum_valid": hit.checksum_valid,
-                        "confidence": round(hit.confidence, 3),
-                    },
-                    ensure_ascii=False,
+        for label, hits in sources:
+            for hit in hits:
+                click.echo(
+                    json.dumps(
+                        {
+                            "file": label,
+                            "type": hit.type,
+                            "line": hit.line,
+                            "col": hit.col,
+                            "checksum_valid": hit.checksum_valid,
+                            "confidence": round(hit.confidence, 3),
+                        },
+                        ensure_ascii=False,
+                    )
                 )
-            )
-        sys.exit(0 if not hits else 1)
+        sys.exit(1 if any_hits else 0)
 
-    if not hits:
-        _out.print(f"[green]✓[/green] {file}: no CN-PII detected.")
+    if not any_hits:
+        for label, _hits in sources:
+            _out.print(f"[green]✓[/green] {label}: no CN-PII detected.")
         sys.exit(0)
 
-    table = Table(title=f"CN-PII in {file}", title_justify="left", show_lines=False)
-    table.add_column("Line", justify="right", style="cyan", no_wrap=True)
-    table.add_column("Col", justify="right", style="cyan", no_wrap=True)
-    table.add_column("Type", style="magenta")
-    table.add_column("类型", style="magenta")
-    table.add_column("Checksum", justify="center")
-    table.add_column("Confidence", justify="right")
+    total = 0
+    for label, hits in sources:
+        if not hits:
+            continue
+        table = Table(title=f"CN-PII in {label}", title_justify="left", show_lines=False)
+        table.add_column("Line", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Col", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Type", style="magenta")
+        table.add_column("类型", style="magenta")
+        table.add_column("Checksum", justify="center")
+        table.add_column("Confidence", justify="right")
 
-    for hit in hits:
-        check = (
-            Text("✓", style="green") if hit.checksum_valid else Text("—", style="yellow")
-        )
-        table.add_row(
-            str(hit.line),
-            str(hit.col),
-            hit.type,
-            _label(hit.type),
-            check,
-            f"{hit.confidence:.2f}",
-        )
+        for hit in hits:
+            check = (
+                Text("✓", style="green") if hit.checksum_valid else Text("—", style="yellow")
+            )
+            table.add_row(
+                str(hit.line),
+                str(hit.col),
+                hit.type,
+                _label(hit.type),
+                check,
+                f"{hit.confidence:.2f}",
+            )
 
-    _out.print(table)
-    _out.print(f"[bold]{len(hits)}[/bold] hit(s) — checksum-validated only.")
+        _out.print(table)
+        total += len(hits)
+
+    _out.print(f"[bold]{total}[/bold] hit(s) — checksum-validated only.")
     # Non-zero exit when PII is present, so CI / pre-commit hooks can gate on it.
     sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
+# redactgate mask  (stdin -> stdout egress filter)
+# --------------------------------------------------------------------------- #
+
+
+@cli.command(help="Zero-friction egress filter: mask CN-PII on stdin to stdout.")
+@click.option(
+    "--rules",
+    "rules_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="User ruleset YAML merged on top of the bundled default.",
+)
+@click.option(
+    "--style",
+    type=click.Choice(["partial", "full", "label"]),
+    default=None,
+    help="Override the masking style (default: from the ruleset, 'partial').",
+)
+@click.option(
+    "--report",
+    is_flag=True,
+    help="Print a per-type summary table to stderr after masking.",
+)
+@click.option(
+    "--audit",
+    "audit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="JSONL audit log to append masked-field records to (default: none).",
+)
+def mask(
+    rules_path: Optional[str],
+    style: Optional[str],
+    report: bool,
+    audit_path: Optional[str],
+) -> None:
+    """Read stdin, mask every checksum-validated CN-PII field, write to stdout.
+
+    The canonical pipe one-liner the demo sells::
+
+        cat examples/demo-repo/leaky.py | redactgate mask
+
+    Business logic survives byte-for-byte; only confirmed PII fields are masked.
+    ``redactgate proxy --stdin`` is kept as a back-compat alias for the same path.
+    """
+    ruleset = _load_rules(rules_path)
+    if style is not None:
+        ruleset = _override_style(ruleset, style)
+    data = sys.stdin.read()
+    result = redact_text(data, ruleset)
+    sys.stdout.write(result.text)
+    sys.stdout.flush()
+    if audit_path:
+        with AuditLog(audit_path) as log:
+            log.append_redactions(result.redactions, file="<stdin>")
+    if report:
+        _print_mask_report(result)
+    else:
+        _err.print(
+            f"[green]redactgate mask[/green] masked [bold]{result.count}[/bold] field(s)"
+            + (f"; logged to {audit_path}" if audit_path else "")
+        )
+    sys.exit(0)
 
 
 # --------------------------------------------------------------------------- #

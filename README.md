@@ -24,6 +24,7 @@
 ```bash
 pip install redactgate
 redactgate scan examples/demo-repo/leaky.py     # 列出每个命中的行号/类型/校验位状态
+redactgate mask < examples/demo-repo/leaky.py    # 出境前字段级掩码（一行 pipe）
 redactgate proxy --stdin < examples/demo-repo/leaky.py | head   # 出境前掩码
 ```
 
@@ -208,7 +209,7 @@ print(result.text)                          # 已脱敏的缓冲区
 
 <h2 id="许可证"><img src="https://api.iconify.design/tabler:license.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 许可证</h2>
 
-[MIT](./LICENSE)。欢迎提 [issue](https://github.com/SuperMarioYL/redactgate/issues) 或 PR——尤其是新的行业 PII 规则与误报样本。
+[Apache 2.0](./LICENSE)。欢迎提 [issue](https://github.com/SuperMarioYL/redactgate/issues) 或 PR——尤其是新的行业 PII 规则与误报样本。
 
 ## Share this
 
@@ -218,4 +219,4 @@ RedactGate — 给 Claude Code 接的本地出站脱敏网关：出境前校验�
 
 ---
 
-<p align="center"><sub><a href="./LICENSE">MIT</a> © 2026 SuperMarioYL</sub></p>
+<p align="center"><sub><a href="./LICENSE">Apache 2.0</a> © 2026 SuperMarioYL</sub></p>
