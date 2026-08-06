@@ -259,6 +259,8 @@ def mask(
         cat examples/demo-repo/leaky.py | redactgate mask
 
     Business logic survives byte-for-byte; only confirmed PII fields are masked.
+    Under a ``block`` policy the masked bytes are NOT written to stdout and the
+    command exits non-zero (a BLOCK must stop egress, not mask-and-forward).
     ``redactgate proxy --stdin`` is kept as a back-compat alias for the same path.
     """
     ruleset = _load_rules(rules_path)
@@ -266,11 +268,20 @@ def mask(
         ruleset = _override_style(ruleset, style)
     data = sys.stdin.read()
     result = redact_text(data, ruleset)
-    sys.stdout.write(result.text)
-    sys.stdout.flush()
+    # Audit first so a block is always recorded, then honour the policy: a BLOCK
+    # must not egress even the masked bytes.
     if audit_path:
         with AuditLog(audit_path) as log:
             log.append_redactions(result.redactions, file="<stdin>")
+    if result.blocked:
+        _err.print(
+            f"[red]redactgate mask[/red] BLOCKED [bold]{result.count}[/bold] field(s) "
+            f"(policy:block); nothing written to stdout"
+            + (f"; logged to {audit_path}" if audit_path else "")
+        )
+        sys.exit(1)
+    sys.stdout.write(result.text)
+    sys.stdout.flush()
     if report:
         _print_mask_report(result)
     else:
@@ -315,6 +326,17 @@ def mask(
     help="JSONL audit log to append masked-field records to.",
 )
 @click.option(
+    "--upstream",
+    "upstream",
+    default=None,
+    metavar="URL",
+    help=(
+        "Gateway mode: forward redacted requests to this HTTPS base "
+        "(e.g. https://api.anthropic.com). Required for HTTPS model APIs — "
+        "point your agent's base URL at this proxy, not HTTPS_PROXY."
+    ),
+)
+@click.option(
     "--no-audit",
     is_flag=True,
     help="Disable audit logging (preview only).",
@@ -322,18 +344,29 @@ def mask(
 def proxy(
     use_stdin: bool,
     listen: Optional[str],
+    upstream: Optional[str],
     rules_path: Optional[str],
     audit_path: str,
     no_audit: bool,
 ) -> None:
-    """Run the stdin filter or the local HTTP forward proxy."""
+    """Run the stdin filter or the local HTTP gateway proxy."""
     ruleset = _load_rules(rules_path)
     audit_log = None if no_audit else AuditLog(audit_path)
-    config = ProxyConfig.build(ruleset=ruleset, audit=audit_log)
+    config = ProxyConfig.build(
+        ruleset=ruleset, audit=audit_log, upstream=upstream
+    )
 
     try:
         if use_stdin:
             result = run_stdin_filter(config)
+            if result.blocked:
+                _err.print(
+                    f"[red]redactgate[/red] BLOCKED "
+                    f"[bold]{result.count}[/bold] field(s) on stdin "
+                    f"(policy:block); nothing written to stdout"
+                    + ("" if no_audit else f"; logged to {audit_path}")
+                )
+                sys.exit(1)
             _err.print(
                 f"[green]redactgate[/green] masked "
                 f"[bold]{result.count}[/bold] field(s) on stdin"
@@ -348,12 +381,23 @@ def proxy(
             f"[green]redactgate proxy[/green] listening on "
             f"http://{bound_host}:{bound_port}"
         )
-        _err.print(
-            "  Point your agent's model client at this address, e.g.\n"
-            f"    export HTTPS_PROXY=http://{bound_host}:{bound_port}\n"
-            "  Outbound request bodies are masked field-level before forwarding."
-            + ("" if no_audit else f"\n  Audit log: {audit_path}")
-        )
+        if upstream:
+            _err.print(
+                "  Gateway mode: point your agent's model client base URL at "
+                f"http://{bound_host}:{bound_port}.\n"
+                f"  Request bodies are masked field-level, then forwarded to "
+                f"{upstream} over HTTPS."
+                + ("" if no_audit else f"\n  Audit log: {audit_path}")
+            )
+        else:
+            _err.print(
+                "  Forward-proxy mode (HTTP targets only). For HTTPS model APIs "
+                "(api.anthropic.com / api.openai.com) restart with:\n"
+                f"    redactgate proxy --listen {bound_host}:{bound_port} "
+                f"--upstream https://api.anthropic.com\n"
+                "  or pipe instead:  <cmd> | redactgate mask | <model-cmd>"
+                + ("" if no_audit else f"\n  Audit log: {audit_path}")
+            )
         _err.print("  Press Ctrl-C to stop.")
         try:
             server.serve_forever()

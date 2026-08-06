@@ -271,15 +271,20 @@ def test_redact_json_payload_preserves_structure() -> None:
         "max_tokens": 256,
     }
     masked = redact_json_payload(payload, config, source="<test>")
+    # redact_json_payload now returns a JsonRedaction (payload + blocked flag);
+    # structure is identical and the blocked flag is False under the default
+    # (mask) policy.
+    assert masked.blocked is False
+    out = masked.payload
     # structure identical, scalars untouched.
-    assert masked["model"] == "demo"
-    assert masked["max_tokens"] == 256
-    assert isinstance(masked["messages"], list)
+    assert out["model"] == "demo"
+    assert out["max_tokens"] == 256
+    assert isinstance(out["messages"], list)
     # PII inside a string leaf is gone; surrounding text preserved.
-    user_content = masked["messages"][0]["content"]
+    user_content = out["messages"][0]["content"]
     assert ID_CARD not in user_content
     assert "fix this:" in user_content
-    assert masked["messages"][1]["content"] == "no pii here"
+    assert out["messages"][1]["content"] == "no pii here"
 
 
 def test_redact_chunk_is_shared_choke_point() -> None:
@@ -312,9 +317,9 @@ def test_http_handler_redacts_json_body_before_forwarding() -> None:
     fake = handler_cls.__new__(handler_cls)
     fake.command = "POST"
     fake.path = "https://api.example.com/v1/chat"
-    masked_body = handler_cls._redact_body(fake, body, "application/json")
+    redacted = handler_cls._redact_body(fake, body, "application/json")
 
-    decoded = json.loads(masked_body.decode("utf-8"))
+    decoded = json.loads(redacted.body.decode("utf-8"))
     content = decoded["messages"][0]["content"]
     assert ID_CARD not in content
     assert content.startswith("see ")
@@ -448,3 +453,207 @@ def test_scan_clean_file_exits_zero(tmp_path) -> None:
     result = runner.invoke(cli, ["scan", str(clean)])
     assert result.exit_code == 0
     assert "no CN-PII" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# v0.3.0 — PII/redaction-correctness fixes.
+#
+# Three fail-open / leak bugs folded as type:fix milestones:
+#   fix-block-policy-fail-open  — Policy.BLOCK now actually stops egress
+#   fix-numeric-json-pii-leak   — numeric JSON leaves are masked, not leaked
+#   fix-https-proxy-no-connect  — HTTPS surface via an --upstream gateway mode
+#
+# Each regression test below FAILS without its fix (verified by revert).
+# --------------------------------------------------------------------------- #
+
+
+def _blocking_ruleset():
+    """The bundled default ruleset with default_policy overridden to BLOCK."""
+    import redactgate.rules as rules_mod
+
+    base = load_default_ruleset()
+    return rules_mod.Ruleset(
+        version=base.version,
+        default_policy=Policy.BLOCK,
+        min_confidence=base.min_confidence,
+        masking=base.masking,
+        detectors=base.detectors,
+        allowlist=base.allowlist,
+        custom_patterns=base.custom_patterns,
+    )
+
+
+class _FakeHeaders:
+    """Minimal stand-in for ``BaseHTTPRequestHandler.headers``."""
+
+    def __init__(self, pairs):
+        self._pairs = list(pairs)
+
+    def get(self, key, default=None):
+        for k, v in self._pairs:
+            if k.lower() == key.lower():
+                return v
+        return default
+
+    def items(self):
+        return list(self._pairs)
+
+
+class _FakeRFile:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self, n: int = -1) -> bytes:
+        if n < 0 or n >= len(self._data):
+            d, self._data = self._data, b""
+        else:
+            d, self._data = self._data[:n], self._data[n:]
+        return d
+
+
+class _FakeWFile:
+    def __init__(self):
+        self.written = b""
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+
+def _drive_handle(handler_cls, *, command, path, body=b"", headers=()):
+    """Drive ``_handle()`` with fake I/O (no socket); return ``(status, wfile)``."""
+    fake = handler_cls.__new__(handler_cls)
+    fake.command = command
+    fake.path = path
+    fake.headers = _FakeHeaders(headers)
+    fake.rfile = _FakeRFile(body)
+    wfile = _FakeWFile()
+    fake.wfile = wfile
+    sent = []
+
+    fake.send_response = lambda code: sent.append(("status", code))
+    fake.send_header = lambda k, v: sent.append(("hdr", k, v))
+    fake.end_headers = lambda: sent.append(("end",))
+    handler_cls._handle(fake)
+    status = next((c for tag, c in sent if tag == "status"), None)
+    return status, wfile.written
+
+
+# --- fix-block-policy-fail-open: every egress surface honours Policy.BLOCK --- #
+
+
+def test_block_policy_proxy_returns_403_and_does_not_forward() -> None:
+    """HTTP surface: a BLOCK hit must 403 WITHOUT calling forward (no egress)."""
+    forwarded: dict[str, object] = {}
+
+    def fake_forward(method, url, headers, body, timeout):
+        forwarded["called"] = True
+        forwarded["url"] = url
+        forwarded["body"] = body
+        return UpstreamResponse(
+            200, {"Content-Type": "application/json"}, b'{"ok": true}'
+        )
+
+    config = ProxyConfig.build(ruleset=_blocking_ruleset())
+    handler_cls = make_handler(config, fake_forward)
+
+    body = json.dumps(
+        {"messages": [{"role": "user", "content": f"see {ID_CARD}"}]}
+    ).encode("utf-8")
+    status, wfile = _drive_handle(
+        handler_cls,
+        command="POST",
+        path="/v1/messages",
+        body=body,
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+
+    assert status == 403  # block response, not the 200 from upstream
+    assert "called" not in forwarded  # forward() never invoked -> no PII egress
+    assert ID_CARD not in wfile.decode("utf-8", "replace")
+
+
+def test_block_policy_stdin_filter_writes_nothing() -> None:
+    """stdin surface: a BLOCK hit must write nothing to stdout."""
+    config = ProxyConfig.build(ruleset=_blocking_ruleset())
+    stdin = io.StringIO(SNIPPET)
+    stdout = io.StringIO()
+    result = run_stdin_filter(config, stdin=stdin, stdout=stdout)
+
+    assert result.blocked is True
+    assert stdout.getvalue() == ""  # neither raw nor masked bytes egressed
+    assert ID_CARD not in stdout.getvalue()
+
+
+def test_block_policy_mask_command_exits_nonzero_no_stdout(tmp_path) -> None:
+    """`redactgate mask` under a block policy exits non-zero with clean stdout."""
+    block_rules = tmp_path / "block.yaml"
+    block_rules.write_text("default_policy: block\n", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mask", "--rules", str(block_rules)], input=SNIPPET)
+
+    assert result.exit_code == 1  # non-zero on block (was 0 before the fix)
+    assert ID_CARD not in result.output  # no raw PII egress
+    # not even the masked rendering egressed — stdout stays clean on block
+    assert "1101**********8515" not in result.output
+
+
+# --- fix-numeric-json-pii-leak: numeric JSON leaves are masked --------------- #
+
+
+def test_redact_json_payload_masks_numeric_pii() -> None:
+    """A numeric id_card leaf is redacted, not leaked byte-for-byte."""
+    config = ProxyConfig.build()
+    payload = {"id_card": 110101199003078515, "max_tokens": 256, "flag": True}
+    jr = redact_json_payload(payload, config, source="<test>")
+
+    serialized = json.dumps(jr.payload, ensure_ascii=False)
+    assert "110101199003078515" not in serialized  # raw numeric PII did not leak
+    assert "1101**********8515" in serialized  # masked rendering present
+    assert jr.payload["id_card"] != 110101199003078515  # value changed (masked)
+    # non-PII numeric leaf: type + value preserved
+    assert jr.payload["max_tokens"] == 256
+    assert isinstance(jr.payload["max_tokens"], int)
+    # bool leaf left untouched (not coerced by the int branch)
+    assert jr.payload["flag"] is True
+    assert jr.blocked is False  # default policy is mask, not block
+
+
+# --- fix-https-proxy-no-connect: --upstream gateway routes HTTPS requests --- #
+
+
+def test_upstream_gateway_joins_path_and_routes_request() -> None:
+    """Gateway mode joins self.path to the --upstream base and forwards over HTTPS."""
+    forwarded: dict[str, object] = {}
+
+    def fake_forward(method, url, headers, body, timeout):
+        forwarded["method"] = method
+        forwarded["url"] = url
+        forwarded["body"] = body
+        return UpstreamResponse(
+            200, {"Content-Type": "application/json"}, b'{"ok": true}'
+        )
+
+    config = ProxyConfig.build(upstream="https://api.anthropic.com")
+    handler_cls = make_handler(config, fake_forward)
+
+    body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+    status, wfile = _drive_handle(
+        handler_cls,
+        command="POST",
+        path="/v1/messages",
+        body=body,
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+
+    assert status == 200
+    # the relative path was joined to the upstream base -> routed over HTTPS
+    assert forwarded["url"] == "https://api.anthropic.com/v1/messages"
+    assert forwarded["method"] == "POST"
+    assert b'{"ok": true}' in wfile  # upstream response streamed straight back
