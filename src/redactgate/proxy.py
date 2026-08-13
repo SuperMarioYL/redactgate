@@ -35,7 +35,7 @@ import json
 import sys
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import IO, Any, Callable
+from typing import IO, Any, Callable, Iterable
 from urllib.parse import urljoin
 
 from .audit import AuditLog, build_entry
@@ -337,10 +337,18 @@ def make_handler(
 
             masked = redacted.body
             url = self._forward_url()
+            # Drop hop-by-hop + content-length (recomputed for the masked body) +
+            # the client's Host. In gateway mode the client points its model-SDK
+            # base URL at this local proxy, so its Host is 127.0.0.1:<port>;
+            # httpx honours an explicitly-supplied Host over the URL-derived one,
+            # which would make the model-API edge (Cloudflare/ALB/nginx) route by
+            # the mismatched Host and 404/421/403. Dropping it lets httpx derive
+            # Host from the upstream URL.
             fwd_headers = {
                 k: v
                 for k, v in self.headers.items()
-                if k.lower() not in ("content-length", "proxy-connection", "connection")
+                if k.lower()
+                not in ("content-length", "proxy-connection", "connection", "host")
             }
             try:
                 upstream_resp = forward(
@@ -355,13 +363,62 @@ def make_handler(
                 return
 
             self.send_response(upstream_resp.status_code)
-            for key, value in upstream_resp.headers.items():
-                if key.lower() in ("content-length", "transfer-encoding", "connection"):
-                    continue
-                self.send_header(key, value)
+            if upstream_resp.stream is not None:
+                # Stream the upstream body back to the client chunk-by-chunk under
+                # Transfer-Encoding: chunked (no Content-Length). This is the SSE
+                # / `stream: true` path: tokens reach the client as they arrive
+                # instead of after the whole body is buffered (which would defeat
+                # token-by-token streaming and risk client read timeouts).
+                self._send_upstream_headers(upstream_resp)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                try:
+                    for chunk in upstream_resp.stream:
+                        if chunk:
+                            self.wfile.write(
+                                ("%x\r\n" % len(chunk)).encode("ascii")
+                                + chunk
+                                + b"\r\n"
+                            )
+                            self.wfile.flush()
+                finally:
+                    # Release the upstream stream (its generator closes the httpx
+                    # response + client) and emit the terminating chunk.
+                    _close = getattr(upstream_resp.stream, "close", None)
+                    if _close is not None:
+                        try:
+                            _close()
+                        except Exception:
+                            pass
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                return
+            # Buffered (non-streamable) response: httpx already decompressed the
+            # body, so we advertise Content-Length of the decompressed bytes and
+            # must NOT forward content-encoding (advertising gzip on identity
+            # bytes would make the client fail to gunzip).
+            self._send_upstream_headers(upstream_resp)
             self.send_header("Content-Length", str(len(upstream_resp.content)))
             self.end_headers()
             self.wfile.write(upstream_resp.content)
+
+        def _send_upstream_headers(self, upstream_resp: "UpstreamResponse") -> None:
+            """Forward upstream response headers, dropping the ones the handler
+            owns. ``content-length`` and ``transfer-encoding`` are recomputed
+            below (buffered vs. chunked); ``connection`` is hop-by-hop;
+            ``content-encoding`` is dropped because httpx has already
+            decompressed the body — advertising gzip/deflate on identity bytes
+            would make the client try to gunzip plain text and fail.
+            """
+            for key, value in upstream_resp.headers.items():
+                if key.lower() in (
+                    "content-length",
+                    "transfer-encoding",
+                    "connection",
+                    "content-encoding",
+                ):
+                    continue
+                self.send_header(key, value)
 
         def _send_simple(self, code: int, message: str) -> None:
             body = message.encode("utf-8")
@@ -383,11 +440,28 @@ def make_handler(
 
 @dataclass
 class UpstreamResponse:
-    """A minimal upstream HTTP response (status + headers + body)."""
+    """A minimal upstream HTTP response (status + headers + body).
+
+    The body is either fully buffered in :attr:`content` (the default — used for
+    non-streamable content types and by test fakes) or exposed as a chunk source
+    via :attr:`stream` (used for streaming / SSE responses so tokens reach the
+    client as they arrive rather than after the upstream finishes). When
+    ``stream`` is set the handler forwards the body with ``Transfer-Encoding:
+    chunked`` and never reads it into ``content``.
+
+    Attributes:
+        status_code: upstream HTTP status code.
+        headers: upstream response headers (httpx has already decompressed, so
+            ``content-encoding`` is stale — the handler drops it).
+        content: the fully-buffered, decompressed body (empty when streaming).
+        stream: an iterable yielding decompressed ``bytes`` chunks; when set the
+            handler streams them to the client instead of buffering.
+    """
 
     status_code: int
     headers: dict[str, str]
-    content: bytes
+    content: bytes = b""
+    stream: Iterable[bytes] | None = None
 
 
 def _httpx_forward(
@@ -401,21 +475,59 @@ def _httpx_forward(
 
     Imported lazily so importing :mod:`redactgate.proxy` (and running the stdin
     filter / tests) does not require httpx until the HTTP proxy is actually used.
+
+    The upstream response is opened in *streaming* mode so we can peek the
+    ``Content-Type`` before deciding whether to buffer. Streaming responses
+    (``Content-Type: text/event-stream`` — the common ``stream: true`` model
+    mode) are streamed back chunk-by-chunk via :attr:`UpstreamResponse.stream`
+    instead of being read into memory whole, so token-by-token SSE reaches the
+    client as it arrives (the body is never buffered). httpx auto-decompresses,
+    so :meth:`httpx.Response.iter_bytes` yields identity bytes; the handler
+    drops ``content-encoding`` and forwards the stream under
+    ``Transfer-Encoding: chunked``. Non-streamable content types are read into
+    ``content`` (also decompressed) and forwarded with a recomputed
+    ``Content-Length``. Either way the httpx client/response is closed once the
+    body is consumed (by the generator's ``finally`` or right after ``read()``).
     """
     import httpx
 
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-        response = client.request(
-            method,
-            url,
-            headers=headers,
-            content=body if body else None,
+    client = httpx.Client(timeout=timeout, follow_redirects=False)
+    try:
+        request = client.build_request(
+            method, url, headers=headers, content=body if body else None
         )
+        response = client.send(request, stream=True)
+    except Exception:
+        client.close()
+        raise
+
+    content_type = response.headers.get("content-type", "").lower()
+    if "text/event-stream" in content_type:
+        def _stream() -> Iterable[bytes]:
+            try:
+                for chunk in response.iter_bytes():
+                    if chunk:
+                        yield chunk
+            finally:
+                response.close()
+                client.close()
+
         return UpstreamResponse(
             status_code=response.status_code,
             headers=dict(response.headers),
-            content=response.content,
+            stream=_stream(),
         )
+    try:
+        response.read()
+        content = response.content
+    finally:
+        response.close()
+        client.close()
+    return UpstreamResponse(
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        content=content,
+    )
 
 
 class RedactingProxyServer:

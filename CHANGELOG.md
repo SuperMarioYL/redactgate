@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-14
+
+### Fixed
+
+Three gateway-mode correctness fixes on the `_httpx_forward` / `_handle` path
+introduced by the v0.3.0 `--upstream` gateway mode. Fix-only release, no scope
+expansion.
+
+- **Gateway no longer forwards the client's `Host` header to the HTTPS upstream.**
+  In gateway mode the client points its model-SDK base URL at the local proxy,
+  so its request carries `Host: 127.0.0.1:<port>`; httpx honoured the explicitly
+  supplied Host over the URL-derived one, so model-API edges (Cloudflare/ALB/
+  nginx) routed by the mismatched Host and returned 404/421/403 — the v0.3.0
+  gateway HTTPS surface was broken for the primary use case. The client `Host`
+  is now dropped from the forwarded headers so httpx derives it from the
+  upstream URL.
+- **Gateway no longer advertises `Content-Encoding: gzip` on an already-decompressed body.**
+  httpx auto-decompresses, so the body the proxy holds is identity while the
+  response headers still advertised `content-encoding: gzip` with the original
+  compressed length — the client tried to gunzip plain bytes and failed, so
+  every compressed model-API response (Anthropic/OpenAI gzip by default because
+  the SDK's `Accept-Encoding` is forwarded) was undecodable. `content-encoding`
+  is now dropped from the forwarded response headers.
+- **Gateway streams SSE responses instead of buffering the whole body.**
+  `text/event-stream` responses (the common `stream: true` model mode) are now
+  forwarded chunk-by-chunk under `Transfer-Encoding: chunked` instead of being
+  read into memory whole, so tokens reach the client as they arrive rather than
+  after the upstream finishes (which also risked client-side read timeouts while
+  the proxy blocked on the full body). Non-streamable content types keep the
+  buffered path.
+
+## [0.3.0] - 2026-08-06
+
+### Fixed
+
+- **Policy.BLOCK now stops egress on every surface** instead of
+  masking-and-forwarding: the HTTP gateway returns a 403 without calling the
+  upstream, and the stdin / `mask` commands write nothing to stdout and exit
+  non-zero, while the audit log still records `action=block`.
+- **Numeric JSON leaves carrying PII are redacted**, not leaked byte-for-byte: a
+  request body like `{"id_card": 110101199003078515}` is masked the same as a
+  string leaf (a non-PII number such as `max_tokens: 256` is left untouched).
+- **The `--listen` proxy can actually intercept HTTPS model-API traffic** via an
+  HTTP-gateway `--upstream` mode: the client points its model client base URL at
+  the local proxy, which redacts the body and forwards it over HTTPS to the
+  configured upstream. A blind `CONNECT` tunnel is deliberately not implemented
+  because it could not redact encrypted bodies.
+
+### Added
+
+- Self-hosted product site as a distribution channel.
+
+### Changed
+
+- Reconciled the README footer license example MIT → Apache 2.0.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added
@@ -59,6 +115,8 @@ First public release.
   are enabled, the masking style, and an allowlist; user rulesets merge on top.
 - Bilingual README (中文 primary + English sibling), Apache 2.0 licensed.
 
-[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.4.0
+[0.3.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.1.0

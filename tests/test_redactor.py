@@ -15,12 +15,13 @@ matching the fixtures in ``test_checksum.py``.
 
 from __future__ import annotations
 
+import contextlib
+import gzip
 import io
 import json
 import threading
-from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import pytest
 from click.testing import CliRunner
 
 from redactgate.audit import (
@@ -34,6 +35,7 @@ from redactgate.cli import cli
 from redactgate.proxy import (
     ProxyConfig,
     UpstreamResponse,
+    _httpx_forward,
     make_handler,
     redact_chunk,
     redact_json_payload,
@@ -518,9 +520,18 @@ class _FakeWFile:
     def write(self, data: bytes) -> None:
         self.written += data
 
+    def flush(self) -> None:  # no-op for the in-memory harness
+        return
+
 
 def _drive_handle(handler_cls, *, command, path, body=b"", headers=()):
-    """Drive ``_handle()`` with fake I/O (no socket); return ``(status, wfile)``."""
+    """Drive ``_handle()`` with fake I/O (no socket).
+
+    Returns ``(status, wfile_bytes, sent)`` where ``sent`` is the ordered list
+    of ``(tag, *args)`` the handler emitted via send_response / send_header /
+    end_headers — so header-level regressions (dropped/forwarded headers,
+    chunked vs. content-length) can be asserted directly.
+    """
     fake = handler_cls.__new__(handler_cls)
     fake.command = command
     fake.path = path
@@ -535,7 +546,12 @@ def _drive_handle(handler_cls, *, command, path, body=b"", headers=()):
     fake.end_headers = lambda: sent.append(("end",))
     handler_cls._handle(fake)
     status = next((c for tag, c in sent if tag == "status"), None)
-    return status, wfile.written
+    return status, wfile.written, sent
+
+
+def _sent_headers(sent):
+    """Lower-cased (key, value) pairs the handler emitted via send_header."""
+    return [(t[1].lower(), t[2]) for t in sent if t[0] == "hdr"]
 
 
 # --- fix-block-policy-fail-open: every egress surface honours Policy.BLOCK --- #
@@ -559,7 +575,7 @@ def test_block_policy_proxy_returns_403_and_does_not_forward() -> None:
     body = json.dumps(
         {"messages": [{"role": "user", "content": f"see {ID_CARD}"}]}
     ).encode("utf-8")
-    status, wfile = _drive_handle(
+    status, wfile, _sent = _drive_handle(
         handler_cls,
         command="POST",
         path="/v1/messages",
@@ -633,6 +649,7 @@ def test_upstream_gateway_joins_path_and_routes_request() -> None:
         forwarded["method"] = method
         forwarded["url"] = url
         forwarded["body"] = body
+        forwarded["headers"] = headers
         return UpstreamResponse(
             200, {"Content-Type": "application/json"}, b'{"ok": true}'
         )
@@ -641,7 +658,186 @@ def test_upstream_gateway_joins_path_and_routes_request() -> None:
     handler_cls = make_handler(config, fake_forward)
 
     body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
-    status, wfile = _drive_handle(
+    status, wfile, sent = _drive_handle(
+        handler_cls,
+        command="POST",
+        path="/v1/messages",
+        body=body,
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+            ("Host", "127.0.0.1:8888"),  # the client's local base-url Host
+        ],
+    )
+
+    assert status == 200
+    # the relative path was joined to the upstream base -> routed over HTTPS
+    assert forwarded["url"] == "https://api.anthropic.com/v1/messages"
+    assert forwarded["method"] == "POST"
+    assert b'{"ok": true}' in wfile  # upstream response streamed straight back
+    # fix-gateway-forwarded-host-header: the client's 127.0.0.1:8888 Host must NOT
+    # be forwarded to the upstream (httpx derives Host from the upstream URL).
+    fwd = forwarded["headers"]
+    assert "host" not in {k.lower() for k in fwd}
+    assert all(v != "127.0.0.1:8888" for v in fwd.values())
+
+
+# --------------------------------------------------------------------------- #
+# v0.4.0 — gateway-mode correctness fixes.
+#
+# Three type:fix milestones on the gateway _httpx_forward / _handle path:
+#   fix-gateway-forwarded-host-header     — drop client Host before forwarding
+#   fix-gateway-gzip-content-encoding...  — drop content-encoding (httpx decompressed)
+#   fix-gateway-buffers-streaming-resp.   — stream SSE instead of buffering
+#
+# Each regression test below FAILS without its fix (verified by revert).
+# --------------------------------------------------------------------------- #
+
+
+# --- shared local upstream servers (real httpx transport, no MITM) -------- #
+
+
+class _SilentHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        return
+
+    def _drain_request(self):
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)
+
+
+@contextlib.contextmanager
+def _local_server(handler_cls):
+    """Spin a threaded local HTTP upstream on a free port; yield its base URL."""
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def _decode_chunked(data: bytes) -> bytes:
+    """Parse an HTTP/1.1 chunked body (as emitted by _handle) back to bytes."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        crlf = data.find(b"\r\n", i)
+        if crlf == -1:
+            break
+        size = int(data[i:crlf].split(b";")[0].strip(), 16)
+        if size == 0:
+            break  # terminating chunk
+        i = crlf + 2
+        out += data[i : i + size]
+        i += size + 2  # skip chunk data + trailing CRLF
+    return bytes(out)
+
+
+SSE_EVENTS = (
+    b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+    b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+    b'data: [DONE]\n\n'
+)
+
+GZIP_PAYLOAD = b'{"ok": true, "msg": "hello"}'
+
+
+class _SSEUpstream(_SilentHandler):
+    def do_POST(self):
+        self._drain_request()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        for event in SSE_EVENTS.split(b"\n\n"):
+            if event:
+                self.wfile.write(event + b"\n\n")
+                self.wfile.flush()
+
+
+class _GzipUpstream(_SilentHandler):
+    def do_POST(self):
+        self._drain_request()
+        body = gzip.compress(GZIP_PAYLOAD)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
+
+# --- fix-gateway-forwarded-host-header -------------------------------------- #
+
+
+def test_gateway_does_not_forward_client_host_header() -> None:
+    """Dedicated red->green: the client's local Host never reaches the upstream."""
+    forwarded: dict[str, object] = {}
+
+    def fake_forward(method, url, headers, body, timeout):
+        forwarded["headers"] = headers
+        return UpstreamResponse(200, {"Content-Type": "text/plain"}, b"ok")
+
+    config = ProxyConfig.build(upstream="https://api.anthropic.com")
+    handler_cls = make_handler(config, fake_forward)
+
+    body = b'{"messages":[]}'
+    status, _wfile, _sent = _drive_handle(
+        handler_cls,
+        command="POST",
+        path="/v1/messages",
+        body=body,
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+            ("Host", "127.0.0.1:8888"),
+            ("X-Trace", "keep-me"),
+        ],
+    )
+    assert status == 200
+    fwd = forwarded["headers"]
+    keys = {k.lower() for k in fwd}
+    assert "host" not in keys        # client Host dropped -> httpx derives it
+    assert "x-trace" in keys          # other headers still forwarded
+
+
+# --- fix-gateway-gzip-content-encoding-corrupts-response -------------------- #
+
+
+def test_gateway_drops_content_encoding_on_decompressed_body() -> None:
+    """httpx already decompressed; advertising content-encoding would corrupt it."""
+    decompressed = b'{"ok": true}'
+
+    def fake_forward(method, url, headers, body, timeout):
+        # httpx auto-decompresses: content is plain but headers still advertise gzip.
+        return UpstreamResponse(
+            200,
+            {
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+                "Content-Length": "42",
+            },
+            content=decompressed,
+        )
+
+    config = ProxyConfig.build(upstream="https://api.anthropic.com")
+    handler_cls = make_handler(config, fake_forward)
+
+    body = b'{"messages":[]}'
+    status, wfile, sent = _drive_handle(
         handler_cls,
         command="POST",
         path="/v1/messages",
@@ -651,9 +847,121 @@ def test_upstream_gateway_joins_path_and_routes_request() -> None:
             ("Content-Length", str(len(body))),
         ],
     )
-
     assert status == 200
-    # the relative path was joined to the upstream base -> routed over HTTPS
-    assert forwarded["url"] == "https://api.anthropic.com/v1/messages"
-    assert forwarded["method"] == "POST"
-    assert b'{"ok": true}' in wfile  # upstream response streamed straight back
+    hdrs = dict(_sent_headers(sent))
+    assert "content-encoding" not in hdrs                       # gzip NOT re-advertised
+    assert hdrs["content-length"] == str(len(decompressed))    # recomputed to identity len
+    assert wfile == decompressed                                  # identity body verbatim
+
+
+def test_gateway_gzip_response_decodable_end_to_end() -> None:
+    """Real gzipped upstream + real httpx: client receives identity (decodable) JSON."""
+    with _local_server(_GzipUpstream) as base:
+        config = ProxyConfig.build(upstream=base)
+        handler_cls = make_handler(config, _httpx_forward)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+        status, wfile, sent = _drive_handle(
+            handler_cls,
+            command="POST",
+            path="/v1/messages",
+            body=body,
+            headers=[
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+                ("Accept-Encoding", "gzip"),
+            ],
+        )
+    assert status == 200
+    hdrs = dict(_sent_headers(sent))
+    assert "content-encoding" not in hdrs
+    assert hdrs["content-length"] == str(len(GZIP_PAYLOAD))
+    # the body is the decompressed JSON — a client can json.loads it directly.
+    assert json.loads(wfile.decode("utf-8")) == json.loads(GZIP_PAYLOAD.decode("utf-8"))
+
+
+# --- fix-gateway-buffers-streaming-response -------------------------------- #
+
+
+def test_gateway_streams_sse_response_chunked() -> None:
+    """A streaming upstream body is forwarded under Transfer-Encoding: chunked."""
+    chunks = [
+        b'data: {"delta":"hel"}\n\n',
+        b'data: {"delta":"lo"}\n\n',
+        b'data: [DONE]\n\n',
+    ]
+
+    def fake_forward(method, url, headers, body, timeout):
+        return UpstreamResponse(
+            200,
+            {
+                "Content-Type": "text/event-stream",
+                "Content-Encoding": "gzip",  # must be dropped even on the stream path
+            },
+            stream=iter(chunks),
+        )
+
+    config = ProxyConfig.build(upstream="https://api.anthropic.com")
+    handler_cls = make_handler(config, fake_forward)
+
+    body = b'{"messages":[]}'
+    status, wfile, sent = _drive_handle(
+        handler_cls,
+        command="POST",
+        path="/v1/messages",
+        body=body,
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+    assert status == 200
+    hdrs = dict(_sent_headers(sent))
+    assert hdrs.get("transfer-encoding") == "chunked"
+    assert "content-length" not in hdrs        # streamed -> no Content-Length
+    assert "content-encoding" not in hdrs        # content-encoding dropped on stream path too
+    assert wfile.endswith(b"0\r\n\r\n")          # terminating chunk
+    assert wfile.startswith(("%x\r\n" % len(chunks[0])).encode("ascii"))
+    assert _decode_chunked(wfile) == b"".join(chunks)  # body reconstructs from chunks
+
+
+def test_httpx_forward_streams_sse_without_buffering() -> None:
+    """_httpx_forward returns a stream (not buffered content) for text/event-stream."""
+    with _local_server(_SSEUpstream) as base:
+        resp = _httpx_forward(
+            "POST",
+            base + "/v1/messages",
+            {"Content-Type": "application/json"},
+            b'{"m":1}',
+            10.0,
+        )
+        assert resp.stream is not None
+        assert resp.content == b""  # body was NOT buffered
+        received = b"".join(resp.stream)  # consuming closes the httpx client
+    assert SSE_EVENTS in received
+
+
+def test_gateway_streams_sse_response_end_to_end() -> None:
+    """Real SSE upstream + real httpx: tokens stream back chunked to the client."""
+    with _local_server(_SSEUpstream) as base:
+        config = ProxyConfig.build(upstream=base)
+        handler_cls = make_handler(config, _httpx_forward)
+        body = json.dumps(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+        ).encode("utf-8")
+        status, wfile, sent = _drive_handle(
+            handler_cls,
+            command="POST",
+            path="/v1/messages",
+            body=body,
+            headers=[
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+            ],
+        )
+    assert status == 200
+    hdrs = dict(_sent_headers(sent))
+    assert hdrs.get("transfer-encoding") == "chunked"
+    assert "content-length" not in hdrs
+    assert "content-encoding" not in hdrs
+    assert wfile.endswith(b"0\r\n\r\n")
+    assert _decode_chunked(wfile) == SSE_EVENTS  # every SSE event reached the client
