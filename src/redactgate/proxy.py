@@ -369,10 +369,25 @@ def make_handler(
                 # / `stream: true` path: tokens reach the client as they arrive
                 # instead of after the whole body is buffered (which would defeat
                 # token-by-token streaming and risk client read timeouts).
-                self._send_upstream_headers(upstream_resp)
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
+                #
+                # The try wraps the response-header send too (not just the body
+                # copy): end_headers() flushes the header buffer to self.wfile,
+                # so a client that disconnected before the first chunk (the common
+                # coding-agent cancel-mid-SSE pattern) makes it raise
+                # BrokenPipeError. Before the try was relocated here that raise
+                # happened BEFORE the try was entered, so the finally never ran
+                # and upstream_resp.stream.close() was never called — the open
+                # httpx streaming Response+Client held by _httpx_forward's
+                # _stream() generator leaked (until refcount/GC), and the upstream
+                # model API could keep generating tokens into a buffer with no
+                # consumer. Wrapping the header send ensures a header-send
+                # failure still enters the finally and releases the upstream
+                # stream. The terminating-chunk write below is itself guarded so
+                # a second BrokenPipeError there does not mask the original.
                 try:
+                    self._send_upstream_headers(upstream_resp)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
                     for chunk in upstream_resp.stream:
                         if chunk:
                             self.wfile.write(
@@ -383,15 +398,20 @@ def make_handler(
                             self.wfile.flush()
                 finally:
                     # Release the upstream stream (its generator closes the httpx
-                    # response + client) and emit the terminating chunk.
+                    # response) and emit the terminating chunk. The chunk write is
+                    # guarded: if the client is gone the original header-send
+                    # error must propagate, not be masked by a write failure here.
                     _close = getattr(upstream_resp.stream, "close", None)
                     if _close is not None:
                         try:
                             _close()
                         except Exception:
                             pass
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
+                    try:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
+                    except Exception:
+                        pass
                 return
             # Buffered (non-streamable) response: httpx already decompressed the
             # body, so we advertise Content-Length of the decompressed bytes and
@@ -470,11 +490,23 @@ def _httpx_forward(
     headers: dict[str, str],
     body: bytes,
     timeout: float,
+    *,
+    client: Any | None = None,
 ) -> UpstreamResponse:
     """Forward a (redacted) request upstream with httpx and return the response.
 
     Imported lazily so importing :mod:`redactgate.proxy` (and running the stdin
     filter / tests) does not require httpx until the HTTP proxy is actually used.
+
+    A long-lived, thread-safe :class:`httpx.Client` may be supplied via
+    ``client`` (the gateway owns one and reuses it across requests so the TLS
+    handshake is amortized and HTTP keepalive is enabled, instead of a fresh
+    handshake per request). When ``client`` is ``None`` a per-call Client is
+    constructed and closed here, preserving the standalone/test behaviour. In
+    either case only the per-request streaming :class:`httpx.Response` is closed
+    once the body is consumed — a shared Client is never closed per request
+    (only the gateway closes it on shutdown), so concurrent sends across
+    ThreadingHTTPServer threads stay safe.
 
     The upstream response is opened in *streaming* mode so we can peek the
     ``Content-Type`` before deciding whether to buffer. Streaming responses
@@ -486,19 +518,23 @@ def _httpx_forward(
     drops ``content-encoding`` and forwards the stream under
     ``Transfer-Encoding: chunked``. Non-streamable content types are read into
     ``content`` (also decompressed) and forwarded with a recomputed
-    ``Content-Length``. Either way the httpx client/response is closed once the
-    body is consumed (by the generator's ``finally`` or right after ``read()``).
+    ``Content-Length``.
     """
     import httpx
 
-    client = httpx.Client(timeout=timeout, follow_redirects=False)
+    # A shared Client (gateway mode) is reused — never closed here. A per-call
+    # Client (standalone/tests) is owned by this call and closed with the Response.
+    owned_client = client is None
+    if owned_client:
+        client = httpx.Client(timeout=timeout, follow_redirects=False)
     try:
         request = client.build_request(
             method, url, headers=headers, content=body if body else None
         )
         response = client.send(request, stream=True)
     except Exception:
-        client.close()
+        if owned_client:
+            client.close()
         raise
 
     content_type = response.headers.get("content-type", "").lower()
@@ -510,7 +546,8 @@ def _httpx_forward(
                         yield chunk
             finally:
                 response.close()
-                client.close()
+                if owned_client:
+                    client.close()
 
         return UpstreamResponse(
             status_code=response.status_code,
@@ -522,7 +559,8 @@ def _httpx_forward(
         content = response.content
     finally:
         response.close()
-        client.close()
+        if owned_client:
+            client.close()
     return UpstreamResponse(
         status_code=response.status_code,
         headers=dict(response.headers),
@@ -559,7 +597,36 @@ class RedactingProxyServer:
         self.config = config
         self.host = host
         self.port = port
-        handler = make_handler(config, forward or _httpx_forward)
+        # Own one long-lived, thread-safe httpx.Client so the TLS handshake is
+        # amortized across gateway requests (HTTP keepalive) instead of redone
+        # per request — a real latency hit for the primary coding-agent use case
+        # making many HTTPS model-API requests through the gateway. httpx.Client
+        # is safe for concurrent sends across ThreadingHTTPServer threads; only
+        # individual Responses are closed per request, never the shared Client
+        # (it is closed on shutdown via server_close). When a custom forward is
+        # injected (tests) no shared Client is owned.
+        self._owned_client = None
+        if forward is None:
+            import httpx
+
+            self._owned_client = httpx.Client(
+                timeout=config.upstream_timeout, follow_redirects=False
+            )
+            shared_client = self._owned_client
+
+            def _shared_forward(
+                method: str,
+                url: str,
+                headers: dict[str, str],
+                body: bytes,
+                timeout: float,
+            ) -> UpstreamResponse:
+                return _httpx_forward(
+                    method, url, headers, body, timeout, client=shared_client
+                )
+
+            forward = _shared_forward
+        handler = make_handler(config, forward)
         self._httpd = ThreadingHTTPServer((host, port), handler)
         # If port 0 was requested, capture the OS-assigned port.
         self.port = self._httpd.server_address[1]
@@ -574,12 +641,22 @@ class RedactingProxyServer:
         try:
             self._httpd.serve_forever()
         finally:
-            self._httpd.server_close()
+            self.server_close()
 
     def shutdown(self) -> None:
         """Stop a running :meth:`serve_forever` loop."""
         self._httpd.shutdown()
 
     def server_close(self) -> None:
-        """Release the listening socket."""
+        """Release the listening socket and the shared httpx Client (if owned).
+
+        Idempotent: the socket and any owned :class:`httpx.Client` are released
+        once; subsequent calls are a no-op. ``serve_forever`` calls this from its
+        ``finally`` so the Client is also closed when the loop exits (incl. on
+        Ctrl-C), and the CLI's own ``server_close()`` after a ``KeyboardInterrupt``
+        is therefore a safe no-op second call.
+        """
         self._httpd.server_close()
+        if self._owned_client is not None:
+            self._owned_client.close()
+            self._owned_client = None

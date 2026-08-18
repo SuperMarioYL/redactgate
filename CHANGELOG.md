@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-18
+
+### Fixed
+
+- **Gateway no longer leaks the upstream SSE stream when the response-header send fails.**
+  In the streaming (`text/event-stream`) path the `try/finally` that closes the
+  upstream stream began *after* `end_headers()`, which flushes the header buffer
+  to the client socket. A client that disconnected before the first chunk (the
+  common coding-agent cancel-mid-SSE pattern) made `end_headers()` raise
+  `BrokenPipeError` *before* the `try` was entered, so the `finally` never ran:
+  `upstream_resp.stream.close()` was never called and the open httpx streaming
+  `Response` + `Client` (held by `_httpx_forward`'s `_stream()` generator) leaked
+  until refcount/GC, while the upstream model API could keep generating tokens
+  into a buffer with no consumer. The `try` now wraps the header send too, so a
+  header-send failure still enters the `finally` and releases the stream; the
+  terminating-chunk write is guarded so a second `BrokenPipeError` there does
+  not mask the original.
+
+### Changed
+
+- **The gateway reuses one long-lived `httpx.Client` across requests** instead of
+  constructing and destroying one per request. `_httpx_forward` previously built a
+  fresh `httpx.Client` (full TLS handshake, no HTTP keepalive) on every gateway
+  request — a real latency hit for the primary use case of a coding agent making
+  many HTTPS model-API requests through the gateway. `RedactingProxyServer` now
+  owns a single thread-safe `httpx.Client` (passed into `_httpx_forward`) so the
+  TLS handshake is amortized and keepalive is enabled; only individual per-request
+  `httpx.Response`s are closed, and the shared `Client` is closed on shutdown.
+  Standalone `_httpx_forward` calls (tests) keep the per-call client behaviour.
+
 ## [0.4.0] - 2026-08-14
 
 ### Fixed

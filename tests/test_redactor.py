@@ -21,6 +21,7 @@ import io
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -34,6 +35,7 @@ from redactgate.audit import (
 from redactgate.cli import cli
 from redactgate.proxy import (
     ProxyConfig,
+    RedactingProxyServer,
     UpstreamResponse,
     _httpx_forward,
     make_handler,
@@ -965,3 +967,198 @@ def test_gateway_streams_sse_response_end_to_end() -> None:
     assert "content-encoding" not in hdrs
     assert wfile.endswith(b"0\r\n\r\n")
     assert _decode_chunked(wfile) == SSE_EVENTS  # every SSE event reached the client
+
+
+# --------------------------------------------------------------------------- #
+# v0.5.0 — gateway-mode resource-leak fix + httpx-client reuse.
+#
+#   fix-gateway-stream-leak-on-header-send  (type:fix)
+#       close the upstream SSE stream even when end_headers() raises on a
+#       mid-SSE client disconnect (was leaked: try/finally started AFTER the
+#       header send, so BrokenPipeError skipped the finally).
+#   reuse-httpx-client-in-gateway-forward  (quality)
+#       one long-lived httpx.Client across gateway requests (amortized TLS,
+#       keepalive) instead of a fresh handshake per request; closed on shutdown.
+#
+# Each regression test below FAILS without its source change (verified by
+# revert / mutation).
+# --------------------------------------------------------------------------- #
+
+
+# --- fix-gateway-stream-leak-on-header-send ------------------------------- #
+
+
+def test_gateway_closes_upstream_stream_when_header_send_fails() -> None:
+    """A client disconnect during response-header send must still close the stream.
+
+    end_headers() flushes the header buffer to self.wfile, so a client that
+    disconnected before the first chunk (the coding-agent cancel-mid-SSE
+    pattern) makes it raise BrokenPipeError. Before the fix the try/finally
+    that calls upstream_resp.stream.close() began AFTER end_headers(), so the
+    finally never ran: the open httpx streaming Response+Client held by
+    _httpx_forward's _stream() generator leaked, and the upstream model API
+    could keep generating tokens into a buffer with no consumer.
+
+    The try now wraps the header send too, so the finally still runs and
+    releases the stream. The terminating-chunk write is guarded so a second
+    BrokenPipeError there does not mask the original header-send error.
+    """
+    closed = {"called": False}
+
+    class _ClosableStream:
+        """A stream whose .close() is observable (stands in for the httpx
+        response+client generator _httpx_forward returns for SSE)."""
+
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
+
+        def __iter__(self):
+            for c in self._chunks:
+                yield c
+
+        def close(self):
+            closed["called"] = True
+
+    stream = _ClosableStream([b'data: {"delta":"hi"}\n\n', b'data: [DONE]\n\n'])
+
+    def fake_forward(method, url, headers, body, timeout):
+        return UpstreamResponse(
+            200,
+            {"Content-Type": "text/event-stream"},
+            stream=stream,
+        )
+
+    config = ProxyConfig.build(upstream="https://api.anthropic.com")
+    handler_cls = make_handler(config, fake_forward)
+
+    body = b'{"messages":[]}'
+    fake = handler_cls.__new__(handler_cls)
+    fake.command = "POST"
+    fake.path = "/v1/messages"
+    fake.headers = _FakeHeaders(
+        [
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ]
+    )
+    fake.rfile = _FakeRFile(body)
+    wfile = _FakeWFile()
+    # The client is gone: a terminating-chunk write would also raise. The
+    # finally must swallow this so it does not mask the original header error.
+    wfile.write = lambda _data: (_ for _ in ()).throw(
+        BrokenPipeError("terminating-chunk-write-failed")
+    )
+    fake.wfile = wfile
+    sent = []
+    fake.send_response = lambda code: sent.append(("status", code))
+    fake.send_header = lambda k, v: sent.append(("hdr", k, v))
+
+    def _end_headers():
+        sent.append(("end",))
+        raise BrokenPipeError("header-send-failed")
+
+    fake.end_headers = _end_headers
+
+    # The header-send error propagates (it is the original); the finally must
+    # have run first, closing the upstream stream.
+    propagated = None
+    try:
+        handler_cls._handle(fake)
+    except BrokenPipeError as exc:
+        propagated = exc
+
+    # finally ran despite end_headers() raising -> the upstream stream was
+    # released (no leak). Without the try relocation this stays False.
+    assert closed["called"] is True
+    # The original header-send error propagated, NOT masked by the
+    # terminating-chunk write error (the guard swallowed the second one).
+    assert propagated is not None
+    assert "header-send-failed" in str(propagated)
+
+
+# --- reuse-httpx-client-in-gateway-forward --------------------------------- #
+
+
+def test_httpx_forward_reuses_shared_client_without_closing_it() -> None:
+    """A shared httpx.Client passed into _httpx_forward is reused, not closed.
+
+    Only the per-request streaming Response is closed (in the generator's
+    finally); the shared Client stays open across requests so the gateway can
+    amortize the TLS handshake and keep connections alive. This is the unit
+    contract the server-level reuse leans on.
+    """
+    import httpx
+
+    with _local_server(_SSEUpstream) as base:
+        shared = httpx.Client(timeout=10.0, follow_redirects=False)
+        try:
+            for _ in range(2):
+                resp = _httpx_forward(
+                    "POST",
+                    base + "/v1/messages",
+                    {"Content-Type": "application/json"},
+                    b'{"m":1}',
+                    10.0,
+                    client=shared,
+                )
+                assert resp.stream is not None
+                received = b"".join(resp.stream)  # consume -> closes Response, not Client
+                assert SSE_EVENTS in received
+            # the shared client is still open and reusable (Responses closed,
+            # not the Client)
+            assert shared.is_closed is False
+        finally:
+            shared.close()
+    assert shared.is_closed is True
+
+
+def test_gateway_reuses_one_httpx_client_across_requests() -> None:
+    """RedactingProxyServer owns a single httpx.Client reused across requests.
+
+    Before the fix _httpx_forward constructed+closed a fresh httpx.Client per
+    gateway request, so every request did a full TLS handshake with no
+    keepalive. Now the server owns one long-lived, thread-safe Client (closed
+    on shutdown); only individual Responses are closed per request. Asserts
+    exactly one httpx.Client is constructed for N requests (was N before).
+    """
+    import httpx
+
+    instances: list[httpx.Client] = []
+    real_cls = httpx.Client
+
+    class _SpyClient(real_cls):
+        def __init__(self, *args, **kwargs):
+            instances.append(self)
+            super().__init__(*args, **kwargs)
+
+    with _local_server(_SSEUpstream) as base:
+        config = ProxyConfig.build(upstream=base)
+        with patch("httpx.Client", _SpyClient):
+            server = RedactingProxyServer(config, port=0)
+            handler_cls = server._httpd.RequestHandlerClass
+            shared = server._owned_client
+            assert shared is not None  # server owns a long-lived client
+            body = json.dumps(
+                {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+            ).encode("utf-8")
+            for _ in range(3):
+                status, wfile, sent = _drive_handle(
+                    handler_cls,
+                    command="POST",
+                    path="/v1/messages",
+                    body=body,
+                    headers=[
+                        ("Content-Type", "application/json"),
+                        ("Content-Length", str(len(body))),
+                    ],
+                )
+                assert status == 200
+                # streaming semantics preserved on the shared-client path
+                assert dict(_sent_headers(sent)).get("transfer-encoding") == "chunked"
+                assert _decode_chunked(wfile) == SSE_EVENTS
+            # the shared Client is still alive — Responses were closed, not it
+            assert shared.is_closed is False
+            server.server_close()
+            assert shared.is_closed is True  # closed on shutdown
+        # exactly ONE httpx.Client for all 3 requests (was 3 before the fix)
+        assert len(instances) == 1
