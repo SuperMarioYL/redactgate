@@ -99,3 +99,70 @@ def test_custom_pattern_is_disabled_via_detectors(tmp_path):
     rs = load_ruleset(f)
     hits = detect("see EMP-12345 here", rs)
     assert not any(h.type == "employee_id" for h in hits)
+
+
+# --------------------------------------------------------------------------- #
+# v0.6.0 — honor an explicit confidence: 0.0 on a custom pattern.
+#
+#   fix-custom-pattern-confidence-zero-clobbered  (type:fix)
+#       _coerce_custom_patterns defaulted confidence with `_opt_float(...) or
+#       0.6`; because 0.0 is falsy, a custom pattern declared confidence: 0.0
+#       was silently rewritten to 0.6 (clearing the default min_confidence 0.5
+#       -> over-redaction). Default on None, not truthiness, so 0.0 survives.
+# --------------------------------------------------------------------------- #
+
+
+ZERO_CONF_YAML = (
+    "custom_patterns:\n"
+    "  - type: employee_id\n"
+    "    pattern: 'EMP-\\d{4,6}'\n"
+    "    confidence: 0.0\n"
+)
+
+
+def test_custom_pattern_confidence_zero_is_preserved(tmp_path):
+    """A custom pattern declared confidence: 0.0 must survive, not be clobbered.
+
+    Before the fix `_opt_float(entry.get('confidence')) or 0.6` rewrote a valid
+    0.0 (falsy) to 0.6, so hits the user intended to drop below the default
+    min_confidence (0.5) instead cleared the threshold and got masked — a
+    surprising over-redaction on the user's own extensibility surface. Defaulting
+    on None (not truthiness) lets 0.0 survive.
+    """
+    f = tmp_path / "zero_conf.yaml"
+    f.write_text(ZERO_CONF_YAML, encoding="utf-8")
+    rs = load_ruleset(f)
+    pat = next(p for p in rs.custom_patterns if p.type == "employee_id")
+    # The clobber fix: 0.0 is preserved, not rewritten to 0.6.
+    assert pat.confidence == 0.0
+
+
+def test_custom_pattern_confidence_zero_is_dropped_below_threshold(tmp_path):
+    """A confidence: 0.0 custom pattern's hits are dropped (0.0 < 0.5), not masked.
+
+    This is the user-facing impact of the clobber fix: before, 0.0 -> 0.6 cleared
+    the default 0.5 min_confidence and the hit was masked (over-redaction); now
+    0.0 survives and the hit is correctly dropped below threshold.
+    """
+    f = tmp_path / "zero_conf.yaml"
+    f.write_text(ZERO_CONF_YAML, encoding="utf-8")
+    rs = load_ruleset(f)
+    hits = detect("see EMP-12345 here", rs)
+    # 0.0 < default min_confidence (0.5) -> the employee_id hit is dropped, not
+    # masked. Before the fix this would have contained an employee_id hit.
+    assert not any(h.type == "employee_id" for h in hits)
+
+
+def test_custom_pattern_confidence_defaults_to_0_6_when_absent(tmp_path):
+    """Omitting confidence still applies the 0.6 default (the else branch)."""
+    f = tmp_path / "no_conf.yaml"
+    f.write_text(
+        "custom_patterns:\n"
+        "  - type: employee_id\n"
+        "    pattern: 'EMP-\\d{4,6}'\n",
+        encoding="utf-8",
+    )
+    rs = load_ruleset(f)
+    pat = next(p for p in rs.custom_patterns if p.type == "employee_id")
+    assert pat.confidence == 0.6
+

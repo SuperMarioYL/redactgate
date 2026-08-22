@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-22
+
+### Fixed
+
+- **The gateway now actually closes the upstream httpx SSE stream when the
+  client disconnects during response-header send.** The v0.5.0 fix relocated
+  the `try/finally` so a `BrokenPipeError` from `end_headers()` still entered
+  the finally and called `upstream_resp.stream.close()`. But on the real httpx
+  path that stream was `_httpx_forward`'s `_stream()` generator, and the
+  `for`-loop that would start it sits *after* `end_headers()`. So when
+  `end_headers()` raised on a mid-SSE client disconnect (the exact scenario the
+  v0.5.0 fix targeted), the generator was still in the CREATED state; calling
+  `close()` on a never-started generator is a no-op and does not run its
+  `finally`, so `response.close()` was never called — the httpx streaming
+  `Response` (and owned `Client`) leaked, while the upstream model API could
+  keep emitting tokens into a buffer with no consumer. The v0.5.0 regression
+  test passed only because its fake stream was a class with a plain `.close()`,
+  not a generator, so it never exercised the real path.
+  `_stream()` is now `_UpstreamStream`, a non-generator iterator whose
+  `.close()` unconditionally calls `response.close()` (+`client.close()` when
+  owned), so the handler's finally releases the upstream stream whether or not
+  iteration ever began. The regression test now uses a real SSE upstream +
+  `_httpx_forward` and spies on `httpx.Response.close` / `httpx.Client.close`
+  to assert both are called despite iteration never beginning.
+
+- **A custom pattern declared `confidence: 0.0` is honored instead of being
+  clobbered to 0.6.** `_coerce_custom_patterns` defaulted confidence with
+  `_opt_float(...) or 0.6`; because `0.0` is falsy, a pattern declared with
+  `confidence: 0.0` was silently rewritten to `0.6` — so hits the user intended
+  to drop below the default `min_confidence` (0.5) instead cleared the threshold
+  and got masked (over-redaction on the user's own extensibility surface).
+  Confidence is now defaulted on `None` rather than truthiness, so a valid
+  `0.0` survives.
+
 ## [0.5.0] - 2026-08-18
 
 ### Fixed

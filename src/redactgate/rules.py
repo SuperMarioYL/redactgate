@@ -278,6 +278,12 @@ def _coerce_custom_patterns(raw: Any) -> tuple[CustomPattern, ...]:
             raise RulesError(
                 f"custom_patterns[{i}] pattern is invalid regex: {exc}"
             ) from exc
+        # Default on None, NOT truthiness: `or 0.6` would clobber a valid
+        # confidence of 0.0 (falsy) to 0.6, clearing the default min_confidence
+        # (0.5) and masking hits the user intended to drop below the threshold.
+        conf = _opt_float(
+            entry.get("confidence"), f"custom_patterns[{i}].confidence"
+        )
         out.append(
             CustomPattern(
                 type=str(entry["type"]),
@@ -285,10 +291,7 @@ def _coerce_custom_patterns(raw: Any) -> tuple[CustomPattern, ...]:
                 checksum=(
                     str(entry["checksum"]) if entry.get("checksum") is not None else None
                 ),
-                confidence=_opt_float(
-                    entry.get("confidence"), f"custom_patterns[{i}].confidence"
-                )
-                or 0.6,
+                confidence=conf if conf is not None else 0.6,
             )
         )
     return tuple(out)

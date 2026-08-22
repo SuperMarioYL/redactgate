@@ -397,10 +397,16 @@ def make_handler(
                             )
                             self.wfile.flush()
                 finally:
-                    # Release the upstream stream (its generator closes the httpx
-                    # response) and emit the terminating chunk. The chunk write is
-                    # guarded: if the client is gone the original header-send
-                    # error must propagate, not be masked by a write failure here.
+                    # Release the upstream stream and emit the terminating chunk.
+                    # upstream_resp.stream is _httpx_forward's _UpstreamStream,
+                    # whose .close() unconditionally closes the httpx Response
+                    # (and an owned Client) — so it releases the stream even when
+                    # end_headers() raised before iteration began, since a bare
+                    # generator's close() is a no-op while never started (the
+                    # v0.6.0 residual fix for the v0.5.0 stream-leak). The chunk
+                    # write is guarded: if the client is gone the original
+                    # header-send error must propagate, not be masked by a write
+                    # failure here.
                     _close = getattr(upstream_resp.stream, "close", None)
                     if _close is not None:
                         try:
@@ -484,6 +490,54 @@ class UpstreamResponse:
     stream: Iterable[bytes] | None = None
 
 
+class _UpstreamStream:
+    """Iterable over an httpx streaming ``Response`` that releases it on close.
+
+    Replaces the bare ``_stream()`` generator used before v0.6.0. A generator's
+    ``close()`` is a no-op while it is still in the CREATED state (never
+    iterated), so if the handler aborted before the first ``next()`` — e.g.
+    ``end_headers()`` raised on a mid-SSE client disconnect — the generator's
+    ``finally`` (which calls ``response.close()``) never ran and the httpx
+    streaming ``Response`` plus any owned ``Client`` leaked, while the upstream
+    model API kept emitting tokens into a buffer with no consumer. This object's
+    ``close()`` is a plain method that *always* releases the ``Response`` (and an
+    owned ``Client``), so the handler's finally releases the upstream stream
+    whether or not iteration ever began. Like the generator it replaces, it also
+    releases on normal exhaustion or an upstream error mid-iteration.
+    """
+
+    def __init__(self, response: Any, *, owned_client: Any | None) -> None:
+        self._response = response
+        self._owned_client = owned_client
+        self._iterator = response.iter_bytes()
+        self._closed = False
+
+    def __iter__(self) -> "_UpstreamStream":
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            while True:
+                chunk = next(self._iterator)
+                if chunk:
+                    return chunk
+        except Exception:
+            # Normal exhaustion (StopIteration) or an upstream error mid-stream:
+            # release the httpx Response now, mirroring the generator's finally.
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._response.close()
+        finally:
+            if self._owned_client is not None:
+                self._owned_client.close()
+
+
 def _httpx_forward(
     method: str,
     url: str,
@@ -539,20 +593,16 @@ def _httpx_forward(
 
     content_type = response.headers.get("content-type", "").lower()
     if "text/event-stream" in content_type:
-        def _stream() -> Iterable[bytes]:
-            try:
-                for chunk in response.iter_bytes():
-                    if chunk:
-                        yield chunk
-            finally:
-                response.close()
-                if owned_client:
-                    client.close()
-
+        # _UpstreamStream (not a bare generator) so the handler's finally can
+        # release the httpx Response (+owned Client) via .close() even when
+        # iteration never began (end_headers() raised on a mid-SSE client
+        # disconnect) — a generator's close() is a no-op while never started.
         return UpstreamResponse(
             status_code=response.status_code,
             headers=dict(response.headers),
-            stream=_stream(),
+            stream=_UpstreamStream(
+                response, owned_client=client if owned_client else None
+            ),
         )
     try:
         response.read()

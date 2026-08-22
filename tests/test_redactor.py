@@ -989,87 +989,95 @@ def test_gateway_streams_sse_response_end_to_end() -> None:
 
 
 def test_gateway_closes_upstream_stream_when_header_send_fails() -> None:
-    """A client disconnect during response-header send must still close the stream.
+    """A client disconnect during response-header send must still close the
+    real httpx streaming Response even when iteration never began.
 
     end_headers() flushes the header buffer to self.wfile, so a client that
     disconnected before the first chunk (the coding-agent cancel-mid-SSE
-    pattern) makes it raise BrokenPipeError. Before the fix the try/finally
-    that calls upstream_resp.stream.close() began AFTER end_headers(), so the
-    finally never ran: the open httpx streaming Response+Client held by
-    _httpx_forward's _stream() generator leaked, and the upstream model API
-    could keep generating tokens into a buffer with no consumer.
+    pattern) makes it raise BrokenPipeError. The v0.5.0 fix relocated the
+    try/finally so the finally still calls upstream_resp.stream.close(). But
+    on the REAL httpx path upstream_resp.stream was _httpx_forward's _stream()
+    generator, and the for-loop that would start it sits AFTER end_headers() —
+    so when end_headers() raises the generator is still in the CREATED state,
+    and gen.close() on a never-started generator is a no-op that does NOT run
+    _stream()'s finally, so response.close() was never called and the httpx
+    streaming Response (+owned Client) leaked. The v0.5.0 regression test
+    passed only because its fake stream was a class with a plain .close(), not
+    a generator — it never exercised the real path.
 
-    The try now wraps the header send too, so the finally still runs and
-    releases the stream. The terminating-chunk write is guarded so a second
-    BrokenPipeError there does not mask the original header-send error.
+    v0.6.0 replaces _stream() with _UpstreamStream, a non-generator iterator
+    whose .close() unconditionally calls response.close() (+client.close() when
+    owned). This test uses a REAL SSE upstream + _httpx_forward and a fake
+    end_headers() that raises before the first next(), then spies on
+    httpx.Response.close / httpx.Client.close to assert both were actually
+    called despite iteration never beginning — the path the v0.5.0 fake missed.
     """
-    closed = {"called": False}
+    import httpx
 
-    class _ClosableStream:
-        """A stream whose .close() is observable (stands in for the httpx
-        response+client generator _httpx_forward returns for SSE)."""
+    resp_closed = {"n": 0}
+    client_closed = {"n": 0}
+    real_resp_close = httpx.Response.close
+    real_client_close = httpx.Client.close
 
-        def __init__(self, chunks):
-            self._chunks = list(chunks)
+    def spy_resp_close(self_):
+        resp_closed["n"] += 1
+        return real_resp_close(self_)
 
-        def __iter__(self):
-            for c in self._chunks:
-                yield c
+    def spy_client_close(self_):
+        client_closed["n"] += 1
+        return real_client_close(self_)
 
-        def close(self):
-            closed["called"] = True
+    with _local_server(_SSEUpstream) as base:
+        config = ProxyConfig.build(upstream=base)
+        # _httpx_forward with no client= owns a per-call Client, so closing the
+        # stream closes both the httpx Response AND the owned Client.
+        with patch.object(httpx.Response, "close", spy_resp_close), patch.object(
+            httpx.Client, "close", spy_client_close
+        ):
+            handler_cls = make_handler(config, _httpx_forward)
+            body = json.dumps({"messages": [], "stream": True}).encode("utf-8")
+            fake = handler_cls.__new__(handler_cls)
+            fake.command = "POST"
+            fake.path = "/v1/messages"
+            fake.headers = _FakeHeaders(
+                [
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", str(len(body))),
+                ]
+            )
+            fake.rfile = _FakeRFile(body)
+            wfile = _FakeWFile()
+            # The client is gone: a terminating-chunk write would also raise.
+            # The finally must swallow this so it does not mask the original
+            # header error.
+            wfile.write = lambda _data: (_ for _ in ()).throw(
+                BrokenPipeError("terminating-chunk-write-failed")
+            )
+            fake.wfile = wfile
+            sent = []
+            fake.send_response = lambda code: sent.append(("status", code))
+            fake.send_header = lambda k, v: sent.append(("hdr", k, v))
 
-    stream = _ClosableStream([b'data: {"delta":"hi"}\n\n', b'data: [DONE]\n\n'])
+            def _end_headers():
+                sent.append(("end",))
+                raise BrokenPipeError("header-send-failed")
 
-    def fake_forward(method, url, headers, body, timeout):
-        return UpstreamResponse(
-            200,
-            {"Content-Type": "text/event-stream"},
-            stream=stream,
-        )
+            fake.end_headers = _end_headers
 
-    config = ProxyConfig.build(upstream="https://api.anthropic.com")
-    handler_cls = make_handler(config, fake_forward)
+            # The header-send error propagates (it is the original); the finally
+            # must have run first, closing the upstream stream.
+            propagated = None
+            try:
+                handler_cls._handle(fake)
+            except BrokenPipeError as exc:
+                propagated = exc
 
-    body = b'{"messages":[]}'
-    fake = handler_cls.__new__(handler_cls)
-    fake.command = "POST"
-    fake.path = "/v1/messages"
-    fake.headers = _FakeHeaders(
-        [
-            ("Content-Type", "application/json"),
-            ("Content-Length", str(len(body))),
-        ]
-    )
-    fake.rfile = _FakeRFile(body)
-    wfile = _FakeWFile()
-    # The client is gone: a terminating-chunk write would also raise. The
-    # finally must swallow this so it does not mask the original header error.
-    wfile.write = lambda _data: (_ for _ in ()).throw(
-        BrokenPipeError("terminating-chunk-write-failed")
-    )
-    fake.wfile = wfile
-    sent = []
-    fake.send_response = lambda code: sent.append(("status", code))
-    fake.send_header = lambda k, v: sent.append(("hdr", k, v))
-
-    def _end_headers():
-        sent.append(("end",))
-        raise BrokenPipeError("header-send-failed")
-
-    fake.end_headers = _end_headers
-
-    # The header-send error propagates (it is the original); the finally must
-    # have run first, closing the upstream stream.
-    propagated = None
-    try:
-        handler_cls._handle(fake)
-    except BrokenPipeError as exc:
-        propagated = exc
-
-    # finally ran despite end_headers() raising -> the upstream stream was
-    # released (no leak). Without the try relocation this stays False.
-    assert closed["called"] is True
+    # The httpx streaming Response (and the owned Client) were released by the
+    # handler's finally even though end_headers() raised before iteration began.
+    # With the old bare-generator _stream(), gen.close() on a never-started
+    # generator was a no-op and these stayed 0 (the leak).
+    assert resp_closed["n"] == 1
+    assert client_closed["n"] == 1
     # The original header-send error propagated, NOT masked by the
     # terminating-chunk write error (the guard swallowed the second one).
     assert propagated is not None
