@@ -171,7 +171,16 @@ class Recognizer:
 _ID_CARD_RE = re.compile(r"(?<![0-9A-Za-z])(?P<v>\d{17}[0-9Xx])(?![0-9A-Za-z])")
 
 # 手机号: the number plan itself is the signal (1, then 3-9, then 9 digits).
-_PHONE_RE = re.compile(r"(?<!\d)(?P<v>1[3-9]\d{9})(?!\d)")
+# A grouped alternative mirrors the bank-card recognizer so a mobile number
+# written with space/dash separators (138-0013-8000 / 138 0013 8000 — the common
+# display form in code/diffs) is detected too; without it those forms leaked
+# byte-for-byte while a grouped bank card (6222 0210 0011 2230) was caught. The
+# two alternatives are mutually exclusive (a separator is present or not), so a
+# value never matches twice; the lookarounds still forbid matching inside a
+# longer digit run.
+_PHONE_RE = re.compile(
+    r"(?<!\d)(?P<v>1[3-9]\d(?:[ -]\d{4}){2}|1[3-9]\d{9})(?!\d)"
+)
 
 # 银行卡: 13-19 digits, optionally grouped by single spaces or dashes (e.g.
 # "6222 0210 0011 2233 444"). We clean separators before the Luhn check.

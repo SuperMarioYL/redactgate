@@ -187,6 +187,36 @@ def test_block_policy_sets_blocked_flag() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# v0.7 — overlapping spans + grouped phone (regression for the two v0.7 fixes)
+# --------------------------------------------------------------------------- #
+
+
+def test_overlap_id_card_x_masked_once_not_twice() -> None:
+    # A 身份证 ending in the 'X' check digit whose 17-digit prefix also passes
+    # Luhn is matched by BOTH id_card (18 chars) and bank_card (17-digit prefix)
+    # on overlapping-but-not-identical spans. It must be masked + audited
+    # exactly once (as id_card), not double-counted as a bank_card.
+    card = "11010119900300206X"  # GB 11643 valid; 17-digit prefix Luhn-valid
+    result = redact_text(f"id={card}")
+    assert card not in result.text
+    assert result.count == 1
+    assert [r.type for r in result.redactions] == ["id_card"]
+
+
+def test_grouped_phone_with_separators_is_detected_and_masked() -> None:
+    # A Chinese mobile written with space/dash separators (138-0013-8000 /
+    # 138 0013 8000 — the common display form in code/diffs) is detected like a
+    # grouped bank card, not leaked byte-for-byte.
+    for formatted in ("138-0013-8000", "138 0013 8000"):
+        text = f"call {formatted}"
+        result = redact_text(text)
+        assert formatted not in result.text
+        assert result.count == 1
+        assert result.redactions[0].type == "phone"
+        assert result.text.startswith("call ")
+
+
+# --------------------------------------------------------------------------- #
 # audit — entry per masked field, masked preview only (never raw), roundtrip
 # --------------------------------------------------------------------------- #
 

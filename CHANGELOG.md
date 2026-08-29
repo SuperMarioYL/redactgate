@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-29
+
+### Fixed
+
+- **Overlapping PII spans are now masked and audited once, not twice.** A
+  居民身份证 whose 18th character is the GB 11643 check digit `X` was matched
+  by both the id_card recognizer (18 chars) and the bank_card recognizer (its
+  17-digit prefix, whose trailing `X` satisfies the bank-card lookahead); when
+  that prefix also passed Luhn, both detections survived the identical-span
+  dedupe (their spans differ) and one PII value produced two `Redaction`s — the
+  audit log over-counted and mislabelled a `bank_card` entry for an 身份证, and
+  for the `label` masking style the second application corrupted the buffer.
+  `_dedupe_spans` now collapses overlapping spans (not just identical ones),
+  keeping the highest-confidence detection per overlap cluster, so each byte is
+  masked and audited at most once. Built-in recognizers use digit/alnum
+  lookarounds so two genuinely distinct PII values are never overlapping; only
+  the same value seen by two recognizers is collapsed.
+
+- **Chinese mobile numbers written with space/dash separators are now
+  detected.** The phone recognizer only matched 11 contiguous digits, so a
+  mobile written as `138-0013-8000` or `138 0013 8000` (the common display form
+  in code/diffs) leaked byte-for-byte, while a grouped bank card
+  (`6222 0210 0011 2230`) was caught. A grouped `1[3-9]\d(?:[ -]\d{4}){2}`
+  alternative now mirrors the bank-card recognizer; the matched raw carries the
+  separators and partial masking preserves them so the field keeps its shape.
+
 ## [0.6.0] - 2026-08-22
 
 ### Fixed

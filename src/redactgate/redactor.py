@@ -267,17 +267,42 @@ def redact_text(text: str, ruleset: Ruleset | None = None) -> RedactResult:
     return redact_detections(text, detections, rules)
 
 
-def _dedupe_spans(detections: Iterable[Detection]) -> list[Detection]:
-    """Collapse detections sharing an identical ``(start, end)`` span.
+def _overlaps(a: Detection, b: Detection) -> bool:
+    """True if half-open spans ``[a.start, a.end)`` and ``[b.start, b.end)`` share any byte."""
+    return a.start < b.end and b.start < a.end
 
-    When two recognizers flag the same bytes (rare, but e.g. a value that is both
-    Luhn- and length-plausible), keep the higher-confidence one so the span is
-    masked exactly once.
+
+def _dedupe_spans(detections: Iterable[Detection]) -> list[Detection]:
+    """Collapse overlapping PII spans, keeping the highest-confidence detection.
+
+    Two recognizers can flag *overlapping* (not just identical) spans for one
+    value. The case that bit v0.6.0: a 居民身份证 whose 18th char is the GB 11643
+    check digit ``'X'`` is matched by the id_card recognizer across all 18 chars
+    ``[s, s+18)`` and by the bank_card recognizer across its 17-digit prefix
+    ``[s, s+17)`` — the trailing ``'X'`` satisfies the bank-card ``(?![\\d-])``
+    lookahead, and ~10% of such prefixes pass Luhn, so both detections clear
+    ``min_confidence``. Because the spans differ, the old identical-only dedupe
+    kept both: one PII value then produced two ``Redaction``\\ s (the audit log
+    over-counted and mislabelled a ``bank_card`` entry for an 身份证) and
+    ``redact_detections`` applied two masks into the same buffer — for the
+    ``label`` style (length-changing) the second application read offsets in an
+    already-mutated buffer and corrupted the output.
+
+    The fix keeps exactly one detection per overlap cluster — the
+    highest-confidence one (id_card 0.99 > bank_card 0.9) — so each byte is
+    masked and audited at most once. Because every built-in recognizer uses
+    digit/alnum lookarounds, two *legitimately distinct* PII values can never be
+    overlapping (they are boundary-separated); the only overlaps are the same
+    value seen by two recognizers, so collapsing them never drops a real hit.
     """
-    best: dict[tuple[int, int], Detection] = {}
-    for det in detections:
-        key = (det.start, det.end)
-        current = best.get(key)
-        if current is None or det.confidence > current.confidence:
-            best[key] = det
-    return list(best.values())
+    # Highest confidence first (tie-break: later start), then greedily keep each
+    # detection that does not overlap one already kept. Identical spans overlap
+    # too, so this subsumes the old identical-key dedupe.
+    ordered = sorted(detections, key=lambda d: (d.confidence, d.start), reverse=True)
+    kept: list[Detection] = []
+    for det in ordered:
+        if any(_overlaps(det, other) for other in kept):
+            continue
+        kept.append(det)
+    # Back to document order so redact_detections can apply right-to-left safely.
+    return sorted(kept, key=lambda d: (d.start, d.end))
