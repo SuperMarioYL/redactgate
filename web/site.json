@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "content_version": "v0.6.0",
-  "generated_at": "2026-08-22",
+  "content_version": "v0.7.0",
+  "generated_at": "2026-08-29",
   "name": "redactgate",
   "github": "https://github.com/SuperMarioYL/redactgate",
   "host": "redactgate.lei6393.com",
