@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-08
+
+### Fixed
+
+- **Version surfaces are now in lockstep at 0.8.0.** At the shipped v0.7.0 the
+  package surfaces (VERSION, pyproject.toml `version`,
+  `redactgate.__version__`, `redactgate --version`) all read 0.7.0, but
+  `web/site.json` `content_version` was still `v0.6.0` — one release stale —
+  so the live site (redactgate.lei6393.com) advertised v0.6.0 while the package
+  shipped 0.7.0. The CHANGELOG bottom link-reference block had drifted too:
+  `[Unreleased]` compared to `v0.4.0...HEAD` (not the latest tag) and the
+  `[0.5.0]` / `[0.6.0]` / `[0.7.0]` release links were missing, so those
+  section headers rendered as plain text with no release link and the
+  "what changed since the last release" diff was wrong. Every version surface is
+  now bumped to 0.8.0 in lockstep, the CHANGELOG link-reference block is rebuilt
+  so `[Unreleased]` compares to `v0.8.0...HEAD` and every release from 0.5.0
+  onward has a link, and a single-source-of-truth version-consistency test
+  asserts the four file surfaces (VERSION, pyproject.toml `version`,
+  `__version__`, `web/site.json` `content_version`) and the CHANGELOG section
+  header all agree, so a future bump that touches only one surface re-fails the
+  test.
+
 ## [0.7.0] - 2026-08-29
 
 ### Fixed
@@ -205,7 +227,11 @@ First public release.
   are enabled, the masking style, and an allowlist; user rulesets merge on top.
 - Bilingual README (中文 primary + English sibling), Apache 2.0 licensed.
 
-[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.8.0
+[0.7.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.7.0
+[0.6.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.6.0
+[0.5.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.5.0
 [0.4.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.2.0
