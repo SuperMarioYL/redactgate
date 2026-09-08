@@ -1,0 +1,31 @@
+{
+  "version": "0.7.0",
+  "scope": "Offline scanning, label masking and block-policy filtering of deliberately synthetic values. No model request or network proxy is exercised; detection does not establish regulatory compliance or complete data-loss prevention.",
+  "inputs": [
+    {
+      "path": "examples/presentation-input.txt",
+      "sha256": "5f6f6aa54179a08fa4fe0f194d414974e41fe986c681bee4ae9420cbafcb9297"
+    },
+    {
+      "path": "examples/presentation-block.yaml",
+      "sha256": "94662ebd582f8b6339639dc832e2af4e929054474cef8970f81d258e64dfd660"
+    }
+  ],
+  "steps": [
+    {
+      "command": "python -m redactgate.cli scan examples/presentation-input.txt --json",
+      "output": "{\"file\": \"examples/presentation-input.txt\", \"type\": \"id_card\", \"line\": 2, \"col\": 4, \"checksum_valid\": true, \"confidence\": 0.99}\n{\"file\": \"examples/presentation-input.txt\", \"type\": \"phone\", \"line\": 3, \"col\": 7, \"checksum_valid\": false, \"confidence\": 0.8}\n{\"file\": \"examples/presentation-input.txt\", \"type\": \"intranet_domain\", \"line\": 4, \"col\": 10, \"checksum_valid\": false, \"confidence\": 0.85}\n",
+      "exit_code": 1
+    },
+    {
+      "command": "python -m redactgate.cli mask --style label < examples/presentation-input.txt",
+      "output": "Synthetic fixture\nid=[身份证-已脱敏]\nphone=[手机号-已脱敏]\nintranet=[内网域名-已脱敏]\norder=110101199003078500\n",
+      "exit_code": 0
+    },
+    {
+      "command": "python -m redactgate.cli mask --rules examples/presentation-block.yaml < examples/presentation-input.txt",
+      "output": "",
+      "exit_code": 1
+    }
+  ]
+}

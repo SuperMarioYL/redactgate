@@ -1,0 +1,5 @@
+Synthetic fixture
+id=110101199003078515
+phone=13800138000
+intranet=buildbox.corp
+order=110101199003078500

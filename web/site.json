@@ -1,119 +1,258 @@
 {
-  "schema": 1,
-  "content_version": "v0.7.0",
-  "generated_at": "2026-08-29",
-  "name": "redactgate",
+  "schema": 3,
+  "name": "RedactGate",
   "github": "https://github.com/SuperMarioYL/redactgate",
   "host": "redactgate.lei6393.com",
+  "palette": "auto",
   "lang": {
     "primary": "zh",
     "toggle": true
   },
-  "accent": [
-    "#22b8a6"
-  ],
+  "meta": {
+    "visual_profile": "neon-particle",
+    "content_version": "0.7.0",
+    "demo_source": "docs/demo-results.json"
+  },
   "hero": {
     "eyebrow": {
-      "zh": "本地 · 无账号 · 一行 pipe",
-      "en": "Local · no account · one pipe"
+      "zh": "识别文本中的中国标识符、手机号和内网域名模式，按规则掩码或阻断，并可记录审计。",
+      "en": "Detect Chinese identifier, phone and internal-domain patterns in text, apply masking or blocking rules, and optionally record an audit."
     },
     "headline": {
-      "zh": "让云端 Coding Agent\n安全碰你的内网私有库",
-      "en": "Let cloud coding agents\ntouch your private repos, safely"
+      "zh": "先检查待发文本，\n再决定掩码或阻断",
+      "en": "Inspect outgoing text.\nChoose masking or blocking."
     },
     "sub": {
-      "zh": "坐在 Agent 与模型之间，出境前只对通过校验位的中国 PII 做字段级掩码，业务逻辑原样进模型，每一次脱敏都落进审计日志。",
-      "en": "It sits between your agent and the model; before anything egresses it masks only checksum-validated Chinese PII field-by-field, leaves the business logic untouched, and logs every mask."
+      "zh": "识别文本中的中国标识符、手机号和内网域名模式，按规则掩码或阻断，并可记录审计。",
+      "en": "Detect Chinese identifier, phone and internal-domain patterns in text, apply masking or blocking rules, and optionally record an audit."
     },
-    "command": "redactgate mask",
+    "href": "#quickstart",
     "cta": {
-      "zh": "开始使用",
-      "en": "Get started"
+      "zh": "运行示例",
+      "en": "Run the example"
     },
     "ctaGithub": {
-      "zh": "在 GitHub 查看",
-      "en": "View on GitHub"
+      "zh": "查看源码",
+      "en": "View source"
     }
+  },
+  "scene": {
+    "kind": "neon-graph",
+    "caption": {
+      "zh": "字段识别 · 掩码策略",
+      "en": "FIELD DETECTION · MASKING POLICY"
+    },
+    "fallback": "/assets/presentation/scene-dark.svg",
+    "fallbackLight": "/assets/presentation/scene-light.svg"
   },
   "advantages": [
     {
       "title": {
-        "zh": "只掩真的 PII，不碰你的业务逻辑",
-        "en": "Masks only real PII, never your logic"
+        "zh": "可查看命中位置",
+        "en": "Inspect match locations"
       },
       "body": {
-        "zh": "身份证走 GB 11643 校验位、银行卡走 Luhn、统一社会信用代码走 mod-31——只对通过校验的串做字段级掩码，普通 18 位计数器原样保留，业务代码一个字节不动地送达模型。",
-        "en": "ID cards pass GB 11643, bank cards pass Luhn, USCC passes mod-31 — only checksum-valid strings are masked field-by-field. A plain 18-digit counter is left alone, and your business code reaches the model byte-for-byte."
-      },
-      "chips": [
-        "› 校验位级 CN-PII 识别",
-        "› 字段级掩码 · 业务逻辑原样"
-      ]
+        "zh": "scan 输出行列、类型与适用校验状态。",
+        "en": "scan emits line, column, type and applicable checksum status."
+      }
     },
     {
       "title": {
-        "zh": "一行 pipe，出境前就掩好",
-        "en": "One pipe, masked before egress"
+        "zh": "策略明确",
+        "en": "Make policy explicit"
       },
       "body": {
-        "zh": "cat 文件 | redactgate mask，出站文本里的身份证/手机号就地掩成 1101**********8515，输出可直接喂给 Agent，零配置；也可起一个本地 HTTP 代理拦出站请求体。",
-        "en": "cat file | redactgate mask and the id-card / phone fields in the outbound text become 1101**********8515 on the spot — pipe it straight to your agent, zero config. Or run a local HTTP proxy that masks request bodies before forwarding."
-      },
-      "chips": [
-        "› redactgate mask 一行过滤",
-        "› 本地 HTTP 代理可选"
-      ]
+        "zh": "按规则选择掩码或不输出。",
+        "en": "Choose masking or no output according to policy."
+      }
     },
     {
       "title": {
-        "zh": "每一次脱敏都有审计留痕",
-        "en": "Every mask leaves an audit trail"
+        "zh": "保留掩码记录",
+        "en": "Retain masked records"
       },
       "body": {
-        "zh": "每掩一个字段就往 JSONL 审计日志写一行——谁、在哪一行、什么类型、掩成什么样，绝不含原始 PII。合规复核一条 grep 就能看清。",
-        "en": "Every masked field appends one JSONL line — who, which line, what type, what it was masked to — never the raw PII. A compliance reviewer can trace the whole trail with one grep."
-      },
-      "chips": [
-        "› JSONL 审计日志",
-        "› 只记掩码 · 不留原文"
-      ]
-    },
-    {
-      "title": {
-        "zh": "自定义你行业的 PII 规则",
-        "en": "Define your sector's PII rules"
-      },
-      "body": {
-        "zh": "一份 YAML 规则里加你自己的识别器——员工号、项目代号、内部主机名——按校验位或纯正则生效，团队规则一次下发，五类内置 CN-PII 之上即插即用。",
-        "en": "Add your own recognizers in one YAML ruleset — employee ids, project codes, internal hostnames — gated by a checksum or plain regex, rolled out once across the team, layered on top of five built-in Chinese-PII types."
-      },
-      "chips": [
-        "› YAML 自定义识别器",
-        "› 五类内置 CN-PII"
-      ]
+        "zh": "可选审计保存处理后的预览与元数据。",
+        "en": "Optional audit retains masked previews and metadata."
+      }
     }
   ],
-  "scene": {
-    "kind": "particle-field"
+  "story": {
+    "intro": {
+      "title": {
+        "zh": "把需要处理的字段单独找出来",
+        "en": "Isolate the fields that need handling"
+      },
+      "body": {
+        "zh": "代码和说明文字里可能混有不应直接发送的字段。RedactGate 在显式接入的文本或网关路径上识别支持的模式，返回命中位置，并根据规则替换或阻断。规则检测范围有限，不是数据不外流或合规状态的全面保证。",
+        "en": "Code and prose can contain fields that should not be sent unchanged. RedactGate detects supported patterns on explicitly routed text or gateway paths, returns hit locations, and masks or blocks by policy. Its rules do not guarantee complete data-loss prevention or compliance."
+      }
+    },
+    "sections": [
+      {
+        "title": {
+          "zh": "从输入到结果",
+          "en": "From input to result"
+        },
+        "body": {
+          "zh": "实际运行 scan、label 掩码和 block 过滤器；最后一步没有 stdout。没有启动代理、发送模型请求或验证法律合规。",
+          "en": "The real scan, label masker and block filter run locally; the final step emits no stdout. No proxy, model request or legal-compliance verification is performed."
+        },
+        "image": {
+          "light": "/assets/presentation/process-light.svg",
+          "dark": "/assets/presentation/process-dark.svg",
+          "alt": {
+            "zh": "实际运行 scan、label 掩码和 block 过滤器；最后一步没有 stdout。没有启动代理、发送模型请求或验证法律合规。",
+            "en": "The real scan, label masker and block filter run locally; the final step emits no stdout. No proxy, model request or legal-compliance verification is performed."
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "工作原理",
+          "en": "How it works"
+        },
+        "body": {
+          "zh": "detectors 识别候选并执行适用校验，rules 合并内置与用户配置，redactor 处理命中区间，mask/proxy 消费结果并执行 block。audit 保存掩码预览与事件元数据。JSON 请求体路径会处理字符串值，响应转发支持流式读取。",
+          "en": "Detectors recognize candidates and apply relevant checks, rules merges defaults with overrides, and redactor rewrites matched spans. mask/proxy consumes the result and enforces block. Audit records masked previews and event metadata. The JSON-body path handles string values, and response forwarding supports streaming."
+        },
+        "image": {
+          "light": "/assets/presentation/architecture-light.svg",
+          "dark": "/assets/presentation/architecture-dark.svg",
+          "alt": {
+            "zh": "detectors 识别候选并执行适用校验，rules 合并内置与用户配置，redactor 处理命中区间，mask/proxy 消费结果并执行 block。audit 保存掩码预览与事件元数据。JSON 请求体路径会处理字符串值，响应转发支持流式读取。",
+            "en": "Detectors recognize candidates and apply relevant checks, rules merges defaults with overrides, and redactor rewrites matched spans. mask/proxy consumes the result and enforces block. Audit records masked previews and event metadata. The JSON-body path handles string values, and response forwarding supports streaming."
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "能力与接入",
+          "en": "Capabilities and integration"
+        },
+        "body": {
+          "zh": "只处理经过本工具的输入；未路由流量、未支持格式、漏报模式不会自动受保护。网关接入与模型协议兼容性需要单独验证，不能仅凭 stdin 结果宣称全链路保护。",
+          "en": "Only routed input is processed. Unrouted traffic, unsupported formats and missed patterns are not automatically protected. Gateway integration and model-protocol compatibility require separate validation beyond stdin results."
+        },
+        "image": {
+          "light": "/assets/presentation/integrations-light.svg",
+          "dark": "/assets/presentation/integrations-dark.svg",
+          "alt": {
+            "zh": "只处理经过本工具的输入；未路由流量、未支持格式、漏报模式不会自动受保护。网关接入与模型协议兼容性需要单独验证，不能仅凭 stdin 结果宣称全链路保护。",
+            "en": "Only routed input is processed. Unrouted traffic, unsupported formats and missed patterns are not automatically protected. Gateway integration and model-protocol compatibility require separate validation beyond stdin results."
+          }
+        }
+      }
+    ],
+    "details": [
+      {
+        "title": {
+          "zh": "代理接入范围",
+          "en": "Gateway routing scope"
+        },
+        "body": {
+          "zh": "需要显式客户端 base URL 接入；不透明拦截系统全部 HTTPS。",
+          "en": "Explicit client base-URL routing is required; system-wide HTTPS is not transparently intercepted."
+        }
+      }
+    ]
   },
-  "cta": {
-    "headline": {
-      "zh": "让数据不出境，让 Agent 放手干",
-      "en": "Keep data onshore; let agents do their work"
+  "demo": {
+    "title": {
+      "zh": "实际运行结果",
+      "en": "Actual demo output"
     },
-    "sub": {
-      "zh": "开源、Apache 2.0、无付费墙。出站脱敏这一核心动作，永不设墙。",
-      "en": "Open source, Apache 2.0, no paywall. The core act of masking on egress is never gated."
+    "note": {
+      "zh": "实际运行 scan、label 掩码和 block 过滤器；最后一步没有 stdout。没有启动代理、发送模型请求或验证法律合规。",
+      "en": "The real scan, label masker and block filter run locally; the final step emits no stdout. No proxy, model request or legal-compliance verification is performed."
     },
-    "button": {
-      "zh": "开始使用",
-      "en": "Get started"
+    "source": "https://github.com/SuperMarioYL/redactgate/blob/main/docs/demo-results.json",
+    "steps": [
+      {
+        "label": {
+          "zh": "定位合成字段",
+          "en": "Locate synthetic fields"
+        },
+        "body": {
+          "zh": "scan 返回命中位置，退出 1 表示发现字段。",
+          "en": "scan returns hit locations; exit 1 indicates detected fields."
+        },
+        "command": "python -m redactgate.cli scan examples/presentation-input.txt --json",
+        "output": "{\"file\": \"examples/presentation-input.txt\", \"type\": \"id_card\", \"line\": 2, \"col\": 4, \"checksum_valid\": true, \"confidence\": 0.99}\n{\"file\": \"examples/presentation-input.txt\", \"type\": \"phone\", \"line\": 3, \"col\": 7, \"checksum_valid\": false, \"confidence\": 0.8}\n{\"file\": \"examples/presentation-input.txt\", \"type\": \"intranet_domain\", \"line\": 4, \"col\": 10, \"checksum_valid\": false, \"confidence\": 0.85}\n",
+        "image": "/assets/presentation/demo-0-light.svg",
+        "imageDark": "/assets/presentation/demo-0-dark.svg"
+      },
+      {
+        "label": {
+          "zh": "替换为标签",
+          "en": "Replace with labels"
+        },
+        "body": {
+          "zh": "仅对识别区间应用 label 样式。",
+          "en": "Apply label style to recognized spans."
+        },
+        "command": "python -m redactgate.cli mask --style label < examples/presentation-input.txt",
+        "output": "Synthetic fixture\nid=[身份证-已脱敏]\nphone=[手机号-已脱敏]\nintranet=[内网域名-已脱敏]\norder=110101199003078500\n",
+        "image": "/assets/presentation/demo-1-light.svg",
+        "imageDark": "/assets/presentation/demo-1-dark.svg"
+      },
+      {
+        "label": {
+          "zh": "阻断输出",
+          "en": "Block output"
+        },
+        "body": {
+          "zh": "block 策略命中后退出 1，stdout 为空。",
+          "en": "A block-policy hit exits 1 with empty stdout."
+        },
+        "command": "python -m redactgate.cli mask --rules examples/presentation-block.yaml < examples/presentation-input.txt",
+        "output": "",
+        "image": "/assets/presentation/demo-2-light.svg",
+        "imageDark": "/assets/presentation/demo-2-dark.svg"
+      }
+    ]
+  },
+  "quickstart": {
+    "title": {
+      "zh": "从完整输入开始",
+      "en": "Start with complete input"
+    },
+    "body": {
+      "zh": "需要 Python 3.12+。示例使用刻意构造的测试文本，scan 与 block 命中时退出 1 是预期行为。",
+      "en": "Requires Python 3.12+. The demo uses deliberately synthetic text. Exit 1 from scan or block is expected when a hit is present."
+    },
+    "steps": [
+      {
+        "title": {
+          "zh": "安装",
+          "en": "Install"
+        },
+        "code": "git clone https://github.com/SuperMarioYL/redactgate.git\ncd redactgate\npython3 -m venv .venv\nsource .venv/bin/activate\npython -m pip install -e ."
+      },
+      {
+        "title": {
+          "zh": "运行自带示例",
+          "en": "Run the supplied example"
+        },
+        "code": "python -m redactgate.cli scan examples/presentation-input.txt --json\npython -m redactgate.cli mask --style label < examples/presentation-input.txt\npython -m redactgate.cli mask --rules examples/presentation-block.yaml < examples/presentation-input.txt"
+      }
+    ]
+  },
+  "limitations": [
+    {
+      "zh": "支持的模式与校验有限，不能保证发现全部敏感数据。",
+      "en": "Supported patterns and checks are limited and cannot guarantee detection of all sensitive data."
+    },
+    {
+      "zh": "规则 confidence 是静态分值，不是已校准概率。",
+      "en": "Rule confidence is a fixed score, not a calibrated probability."
+    },
+    {
+      "zh": "本地检测不等于法律合规或全链路防泄漏证明。",
+      "en": "Local detection is not legal-compliance or end-to-end data-loss-prevention proof."
     }
-  },
+  ],
   "footer": {
-    "tag": {
-      "zh": "给 Claude Code / Codex 接的本地出站脱敏网关",
-      "en": "A local outbound redaction gateway for Claude Code / Codex"
-    }
+    "tag": "0.7.0 · Python 3.12+ · Apache-2.0"
   }
 }

@@ -1,0 +1,90 @@
+{
+  "name": "RedactGate",
+  "tagline": "Inspect and mask recognized fields before forwarding text.",
+  "architecture": {
+    "title": "Text fields through detection and policy",
+    "nodes": [
+      {
+        "title": "Text / JSON input",
+        "detail": "Explicitly routed content"
+      },
+      {
+        "title": "Detectors + rules",
+        "detail": "Patterns and applicable checksums"
+      },
+      {
+        "title": "Redaction result",
+        "detail": "Mask spans or flag block"
+      },
+      {
+        "title": "Filter / gateway",
+        "detail": "Honor policy before output"
+      },
+      {
+        "title": "Audit",
+        "detail": "Masked preview and metadata"
+      }
+    ],
+    "edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        2,
+        4
+      ]
+    ]
+  },
+  "process": {
+    "title": "Inspect a synthetic text fixture",
+    "steps": [
+      {
+        "title": "Scan fields",
+        "detail": "Emit typed hit locations"
+      },
+      {
+        "title": "Mask as labels",
+        "detail": "Keep surrounding text"
+      },
+      {
+        "title": "Apply block",
+        "detail": "No stdout is emitted"
+      }
+    ],
+    "result": "The block-policy example exits 1 with empty stdout; no network request is sent."
+  },
+  "integrations": {
+    "title": "Local filtering and opt-in gateway surfaces",
+    "items": [
+      {
+        "title": "File / stdin scan",
+        "detail": "Location and type report"
+      },
+      {
+        "title": "Text masking",
+        "detail": "partial / full / label"
+      },
+      {
+        "title": "Rules YAML",
+        "detail": "Detector and policy overrides"
+      },
+      {
+        "title": "Gateway upstream",
+        "detail": "Explicit model base URL route"
+      },
+      {
+        "title": "Audit JSONL",
+        "detail": "Local optional records"
+      }
+    ]
+  }
+}
