@@ -104,6 +104,10 @@
           "alt": {
             "zh": "实际运行 scan、label 掩码和 block 过滤器；最后一步没有 stdout。没有启动代理、发送模型请求或验证法律合规。",
             "en": "The real scan, label masker and block filter run locally; the final step emits no stdout. No proxy, model request or legal-compliance verification is performed."
+          },
+          "mobile": {
+            "light": "/assets/presentation/process-mobile-light.svg",
+            "dark": "/assets/presentation/process-mobile-dark.svg"
           }
         }
       },
@@ -122,6 +126,10 @@
           "alt": {
             "zh": "detectors 识别候选并执行适用校验，rules 合并内置与用户配置，redactor 处理命中区间，mask/proxy 消费结果并执行 block。audit 保存掩码预览与事件元数据。JSON 请求体路径会处理字符串值，响应转发支持流式读取。",
             "en": "Detectors recognize candidates and apply relevant checks, rules merges defaults with overrides, and redactor rewrites matched spans. mask/proxy consumes the result and enforces block. Audit records masked previews and event metadata. The JSON-body path handles string values, and response forwarding supports streaming."
+          },
+          "mobile": {
+            "light": "/assets/presentation/architecture-mobile-light.svg",
+            "dark": "/assets/presentation/architecture-mobile-dark.svg"
           }
         }
       },
@@ -140,6 +148,10 @@
           "alt": {
             "zh": "只处理经过本工具的输入；未路由流量、未支持格式、漏报模式不会自动受保护。网关接入与模型协议兼容性需要单独验证，不能仅凭 stdin 结果宣称全链路保护。",
             "en": "Only routed input is processed. Unrouted traffic, unsupported formats and missed patterns are not automatically protected. Gateway integration and model-protocol compatibility require separate validation beyond stdin results."
+          },
+          "mobile": {
+            "light": "/assets/presentation/integrations-mobile-light.svg",
+            "dark": "/assets/presentation/integrations-mobile-dark.svg"
           }
         }
       }
