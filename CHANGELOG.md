@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-09
+
+### Fixed
+
+- **One-line CLI status messages no longer word-wrap at narrow console widths.**
+  The single-line status prints (e.g. the `redactgate scan <clean-file>`
+  "✓ <path>: no CN-PII detected." line) went through rich with the default
+  `soft_wrap=False`, so in a non-TTY (default width 80 — every CI runner,
+  pipe, and scripted invocation) a long file path made rich word-wrap the
+  line mid-phrase. In CI the wrap landed inside "no CN-PII", failing
+  `test_scan_clean_file_exits_zero` on both matrix legs and leaving the `ci`
+  workflow red on main since 2026-09-08; whether the test passed locally was
+  pure tmp-path-length luck. These one-line statuses now render unwrapped
+  (`soft_wrap=True`) on every surface, guarded by a width-forced regression
+  test (`test_scan_clean_status_line_is_wrap_proof`) that fails on the
+  pre-fix source. Version surfaces are bumped to 0.9.0 in lockstep.
+
 ## [0.8.0] - 2026-09-08
 
 ### Fixed
@@ -227,7 +244,8 @@ First public release.
   are enabled, the masking style, and an allowlist; user rulesets merge on top.
 - Bilingual README (中文 primary + English sibling), Apache 2.0 licensed.
 
-[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.9.0
 [0.8.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.8.0
 [0.7.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.7.0
 [0.6.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.6.0

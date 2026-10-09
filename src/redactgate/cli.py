@@ -82,7 +82,10 @@ def _print_mask_report(result: RedactResult) -> None:
     """Render a per-type summary of a mask run to stderr."""
     counts = result.counts_by_type()
     if not counts:
-        _err.print("[green]✓[/green] no CN-PII masked.")
+        # soft_wrap: one-line statuses must never word-wrap at a narrow
+        # console width — a wrapped line splits phrases mid-way (the v0.9.0
+        # fix-cli-status-soft-wrap regression; CI asserted on this line).
+        _err.print("[green]✓[/green] no CN-PII masked.", soft_wrap=True)
         return
     table = Table(title="redactgate mask — summary", title_justify="left")
     table.add_column("Type", style="magenta")
@@ -179,7 +182,13 @@ def scan(files: tuple[str, ...], rules_path: Optional[str], as_json: bool) -> No
 
     if not any_hits:
         for label, _hits in sources:
-            _out.print(f"[green]✓[/green] {label}: no CN-PII detected.")
+            # soft_wrap=True: the label is a user-supplied path of arbitrary
+            # length; at a narrow console width rich's default word-wrap
+            # breaks "no CN-PII" across lines (the ci-red regression this
+            # fixes). One-line statuses render unwrapped on every surface.
+            _out.print(
+                f"[green]✓[/green] {label}: no CN-PII detected.", soft_wrap=True
+            )
         sys.exit(0)
 
     total = 0
@@ -277,7 +286,8 @@ def mask(
         _err.print(
             f"[red]redactgate mask[/red] BLOCKED [bold]{result.count}[/bold] field(s) "
             f"(policy:block); nothing written to stdout"
-            + (f"; logged to {audit_path}" if audit_path else "")
+            + (f"; logged to {audit_path}" if audit_path else ""),
+            soft_wrap=True,
         )
         sys.exit(1)
     sys.stdout.write(result.text)
@@ -287,7 +297,8 @@ def mask(
     else:
         _err.print(
             f"[green]redactgate mask[/green] masked [bold]{result.count}[/bold] field(s)"
-            + (f"; logged to {audit_path}" if audit_path else "")
+            + (f"; logged to {audit_path}" if audit_path else ""),
+            soft_wrap=True,
         )
     sys.exit(0)
 
@@ -364,13 +375,15 @@ def proxy(
                     f"[red]redactgate[/red] BLOCKED "
                     f"[bold]{result.count}[/bold] field(s) on stdin "
                     f"(policy:block); nothing written to stdout"
-                    + ("" if no_audit else f"; logged to {audit_path}")
+                    + ("" if no_audit else f"; logged to {audit_path}"),
+                    soft_wrap=True,
                 )
                 sys.exit(1)
             _err.print(
                 f"[green]redactgate[/green] masked "
                 f"[bold]{result.count}[/bold] field(s) on stdin"
-                + ("" if no_audit else f"; logged to {audit_path}")
+                + ("" if no_audit else f"; logged to {audit_path}"),
+                soft_wrap=True,
             )
             sys.exit(0)
 
@@ -379,7 +392,8 @@ def proxy(
         bound_host, bound_port = server.address
         _err.print(
             f"[green]redactgate proxy[/green] listening on "
-            f"http://{bound_host}:{bound_port}"
+            f"http://{bound_host}:{bound_port}",
+            soft_wrap=True,
         )
         if upstream:
             _err.print(
@@ -444,7 +458,9 @@ def report(audit_path: str) -> None:
     """Print a per-type / per-action summary of an audit log."""
     entries = list(read_entries(audit_path))
     if not entries:
-        _out.print(f"[yellow]No audit entries in {audit_path}.[/yellow]")
+        _out.print(
+            f"[yellow]No audit entries in {audit_path}.[/yellow]", soft_wrap=True
+        )
         sys.exit(0)
 
     by_type: dict[str, int] = {}
@@ -468,7 +484,8 @@ def report(audit_path: str) -> None:
     )
     _out.print(
         f"[bold]{len(entries)}[/bold] field(s) redacted across "
-        f"[bold]{len(files)}[/bold] source(s) — {action_summary}"
+        f"[bold]{len(files)}[/bold] source(s) — {action_summary}",
+        soft_wrap=True,
     )
     sys.exit(0)
 

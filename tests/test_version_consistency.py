@@ -28,7 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_version_surfaces_in_lockstep() -> None:
     """VERSION is the single source of truth; every other surface must agree."""
-    expected = "0.8.0"  # canonical anchor; bump together with VERSION
+    expected = "0.9.0"  # canonical anchor; bump together with VERSION
 
     version_file = (_REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     assert version_file == expected, (

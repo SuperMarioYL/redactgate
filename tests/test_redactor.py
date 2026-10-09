@@ -489,6 +489,30 @@ def test_scan_clean_file_exits_zero(tmp_path) -> None:
     assert "no CN-PII" in result.output
 
 
+def test_scan_clean_status_line_is_wrap_proof(tmp_path, monkeypatch) -> None:
+    """Regression (v0.9.0 fix-cli-status-soft-wrap): the one-line scan status
+    must survive any console width unsplit.
+
+    On shipped v0.8.0 the status print went through rich with the default
+    ``soft_wrap=False``, so in a non-TTY (default width 80) a long file path
+    made rich word-wrap the line mid-phrase. In CI the wrap landed inside
+    "no CN-PII" (``'...clean.py: no \\nCN-PII detected.'``), failing
+    ``test_scan_clean_file_exits_zero`` on both matrix legs and leaving the
+    ``ci`` workflow red on main since 2026-09-08. Whether the old test passed
+    was pure tmp-path-length luck. Force a narrow width so pre-fix source
+    deterministically wraps, then require the status to stay one line.
+    """
+    clean = tmp_path / "clean.py"
+    clean.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    # Narrower than any real tmp path, so pre-fix source must wrap the status.
+    monkeypatch.setenv("COLUMNS", "20")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["scan", str(clean)])
+    assert result.exit_code == 0
+    assert "no CN-PII" in result.output
+    assert result.output.count("\n") == 1, f"status line wrapped: {result.output!r}"
+
+
 # --------------------------------------------------------------------------- #
 # v0.3.0 — PII/redaction-correctness fixes.
 #
