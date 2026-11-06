@@ -33,6 +33,7 @@ from redactgate.audit import (
     read_entries,
 )
 from redactgate.cli import cli
+from redactgate.detectors import detect
 from redactgate.proxy import (
     ProxyConfig,
     RedactingProxyServer,
@@ -52,7 +53,9 @@ from redactgate.rules import (
     MaskingStyle,
     MaskStyleName,
     Policy,
+    RulesError,
     load_default_ruleset,
+    load_ruleset,
 )
 
 # --------------------------------------------------------------------------- #
@@ -1224,3 +1227,106 @@ def test_gateway_reuses_one_httpx_client_across_requests() -> None:
             assert shared.is_closed is True  # closed on shutdown
         # exactly ONE httpx.Client for all 3 requests (was 3 before the fix)
         assert len(instances) == 1
+
+
+# --------------------------------------------------------------------------- #
+# v0.10.0 — fix-overlap-cluster-leaves-bytes-unmasked.
+#
+# _dedupe_spans used to keep only the highest-confidence detection of an
+# overlap cluster and drop the rest, including the bytes the winner does not
+# cover. A custom pattern (the documented extensibility surface) that overlaps a
+# built-in on a narrower span at >= the built-in's confidence therefore left
+# most of a checksum-valid 身份证 in the clear while the run reported success.
+# One redaction per cluster is still right; the span must be the CLUSTER's, not
+# the winner's.
+# --------------------------------------------------------------------------- #
+
+
+def test_overlap_cluster_masks_every_flagged_byte_not_just_the_winner(
+    tmp_path,
+) -> None:
+    rules = tmp_path / "nested.yaml"
+    rules.write_text(
+        "custom_patterns:\n"
+        "  - type: employee_id\n"
+        '    pattern: "110101"\n'
+        "    confidence: 0.99\n",
+        encoding="utf-8",
+    )
+    ruleset = load_ruleset(rules)
+    card = "110101199003078515"  # GB 11643 valid 身份证
+    result = redact_text(f"id={card}", ruleset)
+
+    # On v0.9.0 this read "id=1101*1199003078515": only the 6-char custom span
+    # was masked and 12 of the 18 身份证 digits egressed in the clear.
+    assert card not in result.text
+    assert result.text == "id=1101**********8515"
+    assert result.count == 1  # one value -> one redaction / audit entry
+
+
+# --------------------------------------------------------------------------- #
+# v0.10.0 — fix-phone-country-code-and-443-grouping.
+#
+# _PHONE_RE matched only the contiguous 11 digits and the 3-4-4 grouped form, so
+# a mobile written with a +86 country code glued to the number, or grouped
+# 4-4-3 (1380 0138 000), was not detected and egressed byte-for-byte.
+# --------------------------------------------------------------------------- #
+
+
+def test_phone_forms_with_country_code_and_443_grouping_are_detected() -> None:
+    for form in (
+        "+8613800138000",
+        "tel:+8613800138000",
+        "+86 13800138000",
+        "86 13800138000",
+        "1380 0138 000",
+        "1380-0138-000",
+    ):
+        result = redact_text(f"call {form}")
+        digits = "".join(ch for ch in result.text if ch.isdigit())
+        assert "13800138000" not in digits, f"{form} leaked: {result.text!r}"
+        assert result.count == 1, form
+        assert result.redactions[0].type == "phone", form
+
+
+def test_phone_country_code_never_matches_inside_a_longer_digit_run() -> None:
+    for text in ("86138001380001", "18613800138000", "138001380001"):
+        assert [h for h in detect(text) if h.type == "phone"] == [], text
+
+
+# --------------------------------------------------------------------------- #
+# v0.10.0 — fix-ruleset-errors-dump-traceback.
+#
+# A malformed --rules file is operator input: it must produce the documented
+# RulesError and a one-line CLI error with the usage exit code, not a Python
+# traceback with the internal source tree in it.
+# --------------------------------------------------------------------------- #
+
+
+def test_bad_ruleset_yields_clean_cli_error_not_traceback(tmp_path) -> None:
+    bad = tmp_path / "bad-policy.yaml"
+    bad.write_text("detectors:\n  id_card:\n    policy: blockk\n", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mask", "--rules", str(bad)], input=SNIPPET)
+
+    assert result.exit_code == 2, result.output
+    assert "Traceback" not in result.output
+    assert "error:" in result.output
+    assert "blockk" in result.output
+
+
+def test_malformed_rulesets_raise_rules_error(tmp_path) -> None:
+    cases = {
+        "bad-policy.yaml": "detectors:\n  id_card:\n    policy: blockk\n",
+        "bad-version.yaml": "version: notanint\n",
+        "bad-shape.yaml": "- a\n- b\n",
+        "bad-regex.yaml": 'custom_patterns:\n  - type: x\n    pattern: "("\n',
+    }
+    for name, body in cases.items():
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        try:
+            load_ruleset(path)
+        except RulesError:
+            continue
+        raise AssertionError(f"{name} did not raise RulesError")

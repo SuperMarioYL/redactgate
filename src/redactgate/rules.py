@@ -248,12 +248,23 @@ def _coerce_detectors(raw: Any) -> dict[str, DetectorRule]:
         cfg = cfg or {}
         if not isinstance(cfg, dict):
             raise RulesError(f"detector {name!r} config must be a mapping")
-        policy = cfg.get("policy")
+        policy_raw = cfg.get("policy")
+        policy: Policy | None = None
+        if policy_raw is not None:
+            try:
+                policy = Policy(str(policy_raw))
+            except ValueError as exc:
+                # RulesError, not the bare ValueError: a malformed ruleset is the
+                # documented error type every caller can catch.
+                raise RulesError(
+                    f"detector {name!r} has unknown policy {policy_raw!r}; "
+                    "expected mask|block"
+                ) from exc
         out[name] = DetectorRule(
             type=name,
             enabled=bool(cfg.get("enabled", True)),
             min_confidence=_opt_float(cfg.get("min_confidence"), f"{name}.min_confidence"),
-            policy=Policy(str(policy)) if policy is not None else None,
+            policy=policy,
         )
     return out
 
@@ -354,7 +365,7 @@ def _build_ruleset(data: Mapping[str, Any]) -> Ruleset:
     assert min_confidence is not None  # default supplied above
 
     return Ruleset(
-        version=int(data.get("version", 1)),
+        version=_non_negative_int(data.get("version", 1), "version"),
         default_policy=default_policy,
         min_confidence=min_confidence,
         masking=_coerce_masking(data.get("masking")),

@@ -171,15 +171,23 @@ class Recognizer:
 _ID_CARD_RE = re.compile(r"(?<![0-9A-Za-z])(?P<v>\d{17}[0-9Xx])(?![0-9A-Za-z])")
 
 # 手机号: the number plan itself is the signal (1, then 3-9, then 9 digits).
-# A grouped alternative mirrors the bank-card recognizer so a mobile number
-# written with space/dash separators (138-0013-8000 / 138 0013 8000 — the common
-# display form in code/diffs) is detected too; without it those forms leaked
-# byte-for-byte while a grouped bank card (6222 0210 0011 2230) was caught. The
-# two alternatives are mutually exclusive (a separator is present or not), so a
-# value never matches twice; the lookarounds still forbid matching inside a
-# longer digit run.
+# Grouped alternatives mirror the bank-card recognizer so a mobile number written
+# with space/dash separators (138-0013-8000 / 138 0013 8000 / 1380 0138 000 —
+# the common display forms in code/diffs) is detected too; without them those
+# forms leaked byte-for-byte while a grouped bank card (6222 0210 0011 2230) was
+# caught. An optional +86/86 country code (optionally followed by one separator)
+# is part of the matched span: `+8613800138000` is the canonical international
+# spelling of the same number and used to leak whole, because the `(?<!\d)`
+# lookbehind refused a match right after the country code's final digit. The
+# alternatives are mutually exclusive (a separator sits at a different position
+# in each grouping), so a value never matches twice; the lookarounds still forbid
+# matching inside a longer digit run.
 _PHONE_RE = re.compile(
-    r"(?<!\d)(?P<v>1[3-9]\d(?:[ -]\d{4}){2}|1[3-9]\d{9})(?!\d)"
+    r"(?<!\d)(?P<v>"
+    r"(?:\+?86[ -]?)?1[3-9]\d(?:[ -]\d{4}){2}"  # [+86] 3-4-4 grouped
+    r"|(?:\+?86[ -]?)?1[3-9]\d{2}[ -]\d{4}[ -]\d{3}"  # [+86] 4-4-3 grouped
+    r"|(?:\+?86[ -]?)?1[3-9]\d{9}"  # [+86] contiguous
+    r")(?!\d)"
 )
 
 # 银行卡: 13-19 digits, optionally grouped by single spaces or dashes (e.g.

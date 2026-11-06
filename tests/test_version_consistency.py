@@ -1,17 +1,20 @@
-"""Version-consistency guard (regression for the v0.8.0 version-drift fix).
+"""Version-consistency guard (regression for the v0.8.0 and v0.10.0 drift fixes).
 
 At the shipped v0.7.0 the package surfaces (VERSION, pyproject.toml ``version``,
 ``redactgate.__version__``, ``redactgate --version``) all read 0.7.0, but
-``web/site.json`` ``content_version`` was still ``v0.6.0`` — one release stale
-— so the live site advertised v0.6.0 while the package shipped 0.7.0. The
+``web/site.json`` ``content_version`` was still ``v0.6.0`` — one release stale —
+so the live site advertised v0.6.0 while the package shipped 0.7.0. The
 CHANGELOG bottom link-reference block had drifted too (``[Unreleased]``
-compared to ``v0.4.0...HEAD`` and the ``[0.5.0]`` / ``[0.6.0]`` / ``[0.7.0]``
-release links were missing).
+compared to ``v0.4.0...HEAD`` and the release links were missing).
 
-This test treats the VERSION file as the single source of truth and asserts
-every other version surface agrees with a canonical anchor value, so a future
-bump that touches only one surface re-fails here. Bump the anchor together
-with VERSION; the derived assertions then follow automatically.
+The v0.8.0 guard still missed surfaces: at the shipped v0.9.0 both README
+locales advertised ``v0.7.0`` and ``docs/demo-results.json`` (the recorded-demo
+provenance the README links) recorded ``0.7.0``, while the suite stayed green —
+and the guard itself hardcoded a fifth copy of the version in its own anchor.
+
+This test reads the version from ``VERSION`` (the single source of truth) and
+asserts every shipped surface agrees with it, so a bump that touches only one
+surface re-fails here. Nothing in this file needs editing on a release bump.
 """
 
 from __future__ import annotations
@@ -26,16 +29,16 @@ import redactgate
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _read_text(relative: str) -> str:
+    return (_REPO_ROOT / relative).read_text(encoding="utf-8")
+
+
 def test_version_surfaces_in_lockstep() -> None:
     """VERSION is the single source of truth; every other surface must agree."""
-    expected = "0.9.0"  # canonical anchor; bump together with VERSION
+    expected = _read_text("VERSION").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", expected), f"VERSION is not semver: {expected!r}"
 
-    version_file = (_REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert version_file == expected, (
-        f"VERSION file is {version_file!r}, expected {expected!r}"
-    )
-
-    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads(_read_text("pyproject.toml"))
     assert pyproject["project"]["version"] == expected, (
         "pyproject.toml [project] version drifted from VERSION"
     )
@@ -44,7 +47,7 @@ def test_version_surfaces_in_lockstep() -> None:
         "redactgate.__version__ drifted from VERSION"
     )
 
-    site = json.loads((_REPO_ROOT / "web" / "site.json").read_text(encoding="utf-8"))
+    site = json.loads(_read_text("web/site.json"))
     # The top-level content_version is the canonical site version surface (it is
     # what the live product site renders). Newer site.json schemas also nest a
     # second content_version under `meta` (un-prefixed) and embed the version in
@@ -65,9 +68,31 @@ def test_version_surfaces_in_lockstep() -> None:
             "web/site.json footer.tag drifted from VERSION"
         )
 
-    changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert re.search(rf"^## \[{re.escape(expected)}\]", changelog, re.MULTILINE), (
-        f"CHANGELOG has no '## [{expected}]' section header"
+    # Both README locales carry the release badge on line 12; the non-default
+    # locale is the one that historically went stale (still v0.7.0 at the
+    # v0.9.0 tag).
+    for locale in ("README.md", "README.en.md"):
+        assert f"`v{expected}`" in _read_text(locale), (
+            f"{locale} release badge drifted from VERSION"
+        )
+
+    # The recorded-demo provenance the README links must name the shipped version.
+    demo = json.loads(_read_text("docs/demo-results.json"))
+    assert demo["version"] == expected, (
+        "docs/demo-results.json version drifted from VERSION"
+    )
+
+    changelog = _read_text("CHANGELOG.md")
+    # `## [Unreleased]` comes first; the newest RELEASE heading must be this one,
+    # so an older heading plus a stale VERSION cannot both pass.
+    headings = [
+        heading
+        for heading in re.findall(r"^## \[([^\]]+)\]", changelog, re.MULTILINE)
+        if heading != "Unreleased"
+    ]
+    assert headings, "CHANGELOG has no release section headers"
+    assert headings[0] == expected, (
+        f"newest CHANGELOG section is [{headings[0]}], expected [{expected}]"
     )
     assert (
         f"[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v{expected}...HEAD"

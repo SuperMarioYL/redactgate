@@ -35,6 +35,7 @@ from .redactor import RedactResult, redact_text
 from .rules import (
     MaskStyleName,
     MaskingStyle,
+    RulesError,
     Ruleset,
     load_default_ruleset,
     load_ruleset,
@@ -59,10 +60,20 @@ def _label(detector_type: str) -> str:
 
 
 def _load_rules(rules_path: Optional[str]) -> Ruleset:
-    """Load the effective ruleset (bundled default merged with an optional file)."""
-    if rules_path:
-        return load_ruleset(rules_path)
-    return load_default_ruleset()
+    """Load the effective ruleset (bundled default merged with an optional file).
+
+    A malformed user ruleset is operator input, not a crash: report the
+    :class:`RulesError` message on one line and exit with the usage-error code
+    (2), matching the ``scan`` not-a-file path, instead of dumping a traceback
+    that buries the actual typo under an internal stack.
+    """
+    try:
+        if rules_path:
+            return load_ruleset(rules_path)
+        return load_default_ruleset()
+    except RulesError as exc:
+        _err.print(f"[red]error:[/red] {exc}")
+        sys.exit(2)
 
 
 def _override_style(ruleset: Ruleset, style_name: str) -> Ruleset:

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-07
+
+### Fixed
+
+- **An overlapping detection cluster is now masked across its whole span, not
+  just the highest-confidence member's.** `_dedupe_spans` kept one detection per
+  overlap cluster (correct — a value caught by two recognizers must be masked and
+  audited once) but masked only that winner's span, dropping every byte the
+  winner did not cover. A user `custom_patterns` entry that overlaps a built-in
+  on a narrower span at >= the built-in's confidence therefore won the cluster
+  and left the rest of the value in the clear: with a custom pattern matching the
+  6-digit prefix of a checksum-valid 身份证 at confidence 0.99,
+  `id=110101199003078515` came out as `id=1101*1199003078515` — one character
+  masked, 12 of the 18 digits egressed, and the audit log recorded a single
+  `employee_id` hit. Each cluster is now masked as the union of its members'
+  spans (type, label and checksum status stay the dominant detection's), so no
+  byte any enabled recognizer flagged is left raw while one value still yields
+  one audit entry. The v0.7.0 id_card/bank_card regression is unchanged.
+
+- **Mobile numbers written with a `+86` country code or 4-4-3 grouping are now
+  detected.** The phone recognizer matched only the contiguous 11 digits and the
+  3-4-4 grouped form, so `+8613800138000` (the canonical international spelling,
+  also when glued to the number) and `1380 0138 000` / `1380-0138-000` (the other
+  standard Chinese display grouping) were not detected at all and egressed
+  byte-for-byte. The recognizer now accepts an optional `+86`/`86` prefix
+  (optionally followed by one space or dash, included in the masked span) and
+  the 4-4-3 alternative; the lookarounds still forbid matching inside a longer
+  digit run, so `86138001380001` / `138001380001` stay undetected as before.
+
+- **A malformed `--rules` file produces a one-line error instead of a Python
+  traceback.** `load_ruleset` documents "Raises: RulesError: if a file is
+  missing or malformed", but `detectors.<type>.policy: <unknown>` and a
+  non-numeric `version:` raised bare `ValueError`s, bypassing the documented
+  type, and the CLI caught nothing — so every bad ruleset (including the ones
+  that did raise `RulesError`) dumped a stack trace with the internal source
+  tree in it. Both paths now raise `RulesError` (naming the detector and the
+  `mask|block` choices), and the CLI reports `error: <message>` with exit code 2,
+  matching the existing `scan` not-a-file path.
+
+- **Version surfaces are back in lockstep at 0.10.0, and the guard no longer
+  hardcodes the version.** At the shipped v0.9.0 the package read 0.9.0 while
+  `README.md:12` and `README.en.md:12` still advertised `v0.7.0` and
+  `docs/demo-results.json` (the recorded-demo provenance the README links)
+  recorded `0.7.0`; the suite stayed green because the guard checked only the
+  files it hardcoded — and kept its own copy of the version in an `expected =`
+  anchor. The guard now reads `VERSION` as the single source of truth, covers
+  both README locales and the demo record, and requires the newest `## [x.y.z]`
+  CHANGELOG heading to equal `VERSION`, so a bump that touches one surface fails.
+
 ## [0.9.0] - 2026-10-09
 
 ### Fixed
@@ -244,7 +293,8 @@ First public release.
   are enabled, the masking style, and an allowlist; user rulesets merge on top.
 - Bilingual README (中文 primary + English sibling), Apache 2.0 licensed.
 
-[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/redactgate/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.10.0
 [0.9.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.9.0
 [0.8.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.8.0
 [0.7.0]: https://github.com/SuperMarioYL/redactgate/releases/tag/v0.7.0

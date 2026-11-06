@@ -1,5 +1,5 @@
 {
-  "version": "0.7.0",
+  "version": "0.10.0",
   "scope": "Offline scanning, label masking and block-policy filtering of deliberately synthetic values. No model request or network proxy is exercised; detection does not establish regulatory compliance or complete data-loss prevention.",
   "inputs": [
     {

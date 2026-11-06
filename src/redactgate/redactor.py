@@ -207,9 +207,10 @@ def redact_detections(
     """Mask the given ``detections`` inside ``text`` and return the result.
 
     Spans are applied right-to-left so earlier offsets stay valid as the buffer
-    is rewritten (a ``label`` replacement changes length). Overlapping or
-    duplicate detections at the same span are de-duplicated, keeping the
-    highest-confidence one, so a value caught by two recognizers is masked once.
+    is rewritten (a ``label`` replacement changes length). Overlapping
+    detections are collapsed into one cluster, so a value caught by two
+    recognizers is masked (and audited) once; the cluster is masked as the union
+    of its members' spans, so no byte any recognizer flagged is left raw.
 
     Args:
         text: the buffer to rewrite.
@@ -224,7 +225,7 @@ def redact_detections(
     rules = ruleset if ruleset is not None else load_default_ruleset()
     style = rules.masking
 
-    ordered = _dedupe_spans(detections)
+    ordered = _dedupe_spans(detections, text)
     redactions: list[Redaction] = []
     blocked = False
     buffer = text
@@ -272,8 +273,26 @@ def _overlaps(a: Detection, b: Detection) -> bool:
     return a.start < b.end and b.start < a.end
 
 
-def _dedupe_spans(detections: Iterable[Detection]) -> list[Detection]:
-    """Collapse overlapping PII spans, keeping the highest-confidence detection.
+def _union_span(dominant: Detection, other: Detection, text: str) -> Detection:
+    """Return ``dominant`` widened to cover ``other`` (its type/confidence kept)."""
+    start = min(dominant.start, other.start)
+    end = max(dominant.end, other.end)
+    if (start, end) == (dominant.start, dominant.end):
+        return dominant
+    return Detection(
+        type=dominant.type,
+        start=start,
+        end=end,
+        raw=text[start:end],
+        checksum_valid=dominant.checksum_valid,
+        confidence=dominant.confidence,
+        line=dominant.line,
+        col=dominant.col,
+    )
+
+
+def _dedupe_spans(detections: Iterable[Detection], text: str) -> list[Detection]:
+    """Collapse overlapping PII spans into one union span per cluster.
 
     Two recognizers can flag *overlapping* (not just identical) spans for one
     value. The case that bit v0.6.0: a 居民身份证 whose 18th char is the GB 11643
@@ -288,21 +307,32 @@ def _dedupe_spans(detections: Iterable[Detection]) -> list[Detection]:
     ``label`` style (length-changing) the second application read offsets in an
     already-mutated buffer and corrupted the output.
 
-    The fix keeps exactly one detection per overlap cluster — the
-    highest-confidence one (id_card 0.99 > bank_card 0.9) — so each byte is
-    masked and audited at most once. Because every built-in recognizer uses
-    digit/alnum lookarounds, two *legitimately distinct* PII values can never be
-    overlapping (they are boundary-separated); the only overlaps are the same
-    value seen by two recognizers, so collapsing them never drops a real hit.
+    One cluster still yields exactly one ``Redaction`` (so one audit entry), but
+    the span is the **union** of the cluster's members, not the winner's. The
+    narrower-span case is reachable through ``custom_patterns``: a user pattern
+    that overlaps a built-in on part of its span at >= the built-in's confidence
+    would otherwise win the cluster and leave the rest of the value — e.g. 12 of
+    an 18-digit 身份证 — raw in the outbound buffer. A redactor must fail closed
+    on the widest flagged span; the type, label and checksum status stay the
+    dominant (highest-confidence, then widest) detection's.
     """
-    # Highest confidence first (tie-break: later start), then greedily keep each
-    # detection that does not overlap one already kept. Identical spans overlap
-    # too, so this subsumes the old identical-key dedupe.
-    ordered = sorted(detections, key=lambda d: (d.confidence, d.start), reverse=True)
-    kept: list[Detection] = []
+    # Highest confidence first, widest span next, earliest start last; the member
+    # accepted first in each cluster is its dominant one and keeps its identity.
+    ordered = sorted(
+        detections, key=lambda d: (-d.confidence, -(d.end - d.start), d.start)
+    )
+    clusters: list[Detection] = []
     for det in ordered:
-        if any(_overlaps(det, other) for other in kept):
-            continue
-        kept.append(det)
+        merged = det
+        remaining: list[Detection] = []
+        for kept in clusters:
+            if _overlaps(merged, kept):
+                # ``kept`` was accepted first, so it is the cluster's dominant
+                # member: widen IT to cover the newcomer and keep its identity.
+                merged = _union_span(kept, merged, text)
+            else:
+                remaining.append(kept)
+        remaining.append(merged)
+        clusters = remaining
     # Back to document order so redact_detections can apply right-to-left safely.
-    return sorted(kept, key=lambda d: (d.start, d.end))
+    return sorted(clusters, key=lambda d: (d.start, d.end))

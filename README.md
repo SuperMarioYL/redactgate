@@ -9,7 +9,7 @@
 
 **识别文本中的中国标识符、手机号和内网域名模式，按规则掩码或阻断，并可记录审计。**
 
-`v0.7.0` · `Python 3.12+` · [Apache-2.0](LICENSE)
+`v0.10.0` · `Python 3.12+` · [Apache-2.0](LICENSE)
 
 [Website](https://redactgate.lei6393.com) · [Demo record](docs/demo-results.json)
 
